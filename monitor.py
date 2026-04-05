@@ -35,6 +35,13 @@ def get_masked_webhook_status(webhook_url: str) -> str:
     return "已配置" if webhook_url.strip() else "未配置"
 
 
+def format_monitored_up_label(uid: int, profile) -> str:
+    if profile and profile.get("uname"):
+        resolved_uid = profile.get("mid") or uid
+        return f"{profile['uname']} (UID: {resolved_uid})"
+    return str(uid)
+
+
 class BilibiliMonitor:
     """B站UP主评论监控器"""
     
@@ -62,11 +69,15 @@ class BilibiliMonitor:
         """运行监控循环"""
         print("\n🚀 启动监控...\n")
         await self._check_login_status()
+        monitored_up_label = format_monitored_up_label(
+            UP_UID,
+            await self.bilibili.get_user_profile(UP_UID),
+        )
         
         # 发送启动通知
         self.feishu.send_text(
             f"🚀 B站评论监控已启动\n"
-            f"👤 监控UP主: {UP_UID}\n"
+            f"👤 监控UP主: {monitored_up_label}\n"
             f"⏰ 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
         

@@ -151,6 +151,19 @@ class BilibiliAPI:
                 print(f"⚠️ B站登录态校验失败: {e}")
                 return None
             raise
+
+    async def get_user_profile(self, uid: int) -> Optional[Dict]:
+        """获取指定 UID 的用户信息，用于通知文案等非关键路径。"""
+        try:
+            info = await user.User(uid, credential=self.credential).get_user_info()
+        except Exception as e:
+            print(f"⚠️ 获取UP主信息失败: {e}")
+            return None
+
+        return {
+            "mid": info.get("mid", uid),
+            "uname": info.get("name") or info.get("uname"),
+        }
     
     async def _retry_with_backoff(self, func, max_retries: int = 3, base_delay: float = 1.0):
         """

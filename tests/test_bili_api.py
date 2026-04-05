@@ -62,6 +62,22 @@ class BilibiliAPIAsyncTestCase(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(SecurityControlError):
                 await api.get_video_comments(1)
 
+    async def test_get_user_profile_returns_normalized_name_and_uid(self):
+        api = BilibiliAPI(fetch_mode="api", cookie_string="")
+        mocked_user = AsyncMock()
+        mocked_user.get_user_info.return_value = {
+            "mid": 1671203508,
+            "name": "洪洪火火复盘",
+        }
+
+        with patch("bili_api.user.User", return_value=mocked_user):
+            profile = await api.get_user_profile(1671203508)
+
+        self.assertEqual(
+            profile,
+            {"mid": 1671203508, "uname": "洪洪火火复盘"},
+        )
+
 
 class SecurityControlErrorTestCase(unittest.TestCase):
     def test_string_representation_contains_status_code(self):
