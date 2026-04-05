@@ -6,29 +6,52 @@ from bili_api import BilibiliAPI, SecurityControlError
 from feishu_bot import FeishuBot
 from storage import CommentStorage
 from config import (
+    AFTERNOON_END,
+    AFTERNOON_INTERVAL_SECONDS,
+    AFTERNOON_START,
     UP_UID,
     FEISHU_WEBHOOK,
     DATA_FILE,
+    DEFAULT_INTERVAL_SECONDS,
+    MORNING_END,
+    MORNING_INTERVAL_SECONDS,
+    MORNING_START,
+    PEAK_END,
+    PEAK_INTERVAL_SECONDS,
+    PEAK_START,
     SECURITY_COOLDOWN_SECONDS,
 )
 
 
 def get_check_interval_for_datetime(current: datetime) -> int:
     now = current.time()
-    peak_start = dt_time(9, 20)
-    peak_end = dt_time(9, 40)
-    daytime_morning_start = dt_time(9, 0)
-    daytime_morning_end = dt_time(11, 30)
-    daytime_afternoon_start = dt_time(13, 0)
-    daytime_afternoon_end = dt_time(15, 0)
 
-    if peak_start <= now <= peak_end:
-        return 30
-    if daytime_morning_start <= now <= daytime_morning_end:
-        return 180
-    if daytime_afternoon_start <= now <= daytime_afternoon_end:
-        return 180
-    return 1800
+    if PEAK_START <= now < PEAK_END:
+        return PEAK_INTERVAL_SECONDS
+    if MORNING_START <= now < MORNING_END:
+        return MORNING_INTERVAL_SECONDS
+    if AFTERNOON_START <= now < AFTERNOON_END:
+        return AFTERNOON_INTERVAL_SECONDS
+    return DEFAULT_INTERVAL_SECONDS
+
+
+def format_schedule_time(value: dt_time) -> str:
+    return value.strftime("%H:%M")
+
+
+def format_interval_label(seconds: int) -> str:
+    if seconds % 60 == 0:
+        return f"{seconds // 60}分钟"
+    return f"{seconds}秒"
+
+
+def get_check_schedule_description() -> str:
+    return (
+        f"{format_schedule_time(PEAK_START)}-{format_schedule_time(PEAK_END)} 每{format_interval_label(PEAK_INTERVAL_SECONDS)}, "
+        f"{format_schedule_time(MORNING_START)}-{format_schedule_time(MORNING_END)} 每{format_interval_label(MORNING_INTERVAL_SECONDS)}, "
+        f"{format_schedule_time(AFTERNOON_START)}-{format_schedule_time(AFTERNOON_END)} 每{format_interval_label(AFTERNOON_INTERVAL_SECONDS)}, "
+        f"其余每{format_interval_label(DEFAULT_INTERVAL_SECONDS)}"
+    )
 
 
 def get_masked_webhook_status(webhook_url: str) -> str:
@@ -59,7 +82,7 @@ class BilibiliMonitor:
         print("=" * 60)
         print(f"👤 监控UP主UID: {UP_UID}")
         print(f"🤖 飞书Webhook: {get_masked_webhook_status(FEISHU_WEBHOOK)}")
-        print("⏱️  检查策略: 09:20-09:40 每30秒, 09:00-11:30/13:00-15:00 每3分钟, 其余每30分钟")
+        print(f"⏱️  检查策略: {get_check_schedule_description()}")
         print(f"💾 数据文件: {DATA_FILE}")
         print(f"🔐 B站登录态: {'已配置' if self.bilibili.has_auth() else '未配置'}")
         print(f"🌐 抓取模式: {self.bilibili.fetch_mode}")

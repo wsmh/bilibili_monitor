@@ -89,10 +89,12 @@ BILI_BROWSER_EXECUTABLE=C:\Program Files\Google\Chrome\Application\chrome.exe
 
 ## 轮询策略
 
+- 默认配置下：
 - `09:20 - 09:40`：每 30 秒检测一次
-- `09:00 - 11:30`：每 3 分钟检测一次
+- `09:40 - 11:30`：每 3 分钟检测一次
 - `13:00 - 15:00`：每 3 分钟检测一次
 - 其他时间：每 30 分钟检测一次
+- 上述时间段和间隔都可以在 `.env` 中修改
 
 ## Cookie 失效提示
 
@@ -113,5 +115,15 @@ BILI_BROWSER_EXECUTABLE=C:\Program Files\Google\Chrome\Application\chrome.exe
 | `BILI_BROWSER_EXECUTABLE` | 浏览器路径，留空则自动探测 | 自动探测 |
 | `CHECK_INTERVAL`        | 检查间隔（秒）             | 10      |
 | `BILI_BROWSER_HEADLESS` | 是否无头模式               | true    |
+| `PEAK_START`            | 高峰时段开始时间（HH:MM）  | 09:20   |
+| `PEAK_END`              | 高峰时段结束时间（HH:MM）  | 09:40   |
+| `PEAK_INTERVAL_SECONDS` | 高峰时段检查间隔（秒）     | 30      |
+| `MORNING_START`         | 上午常规时段开始时间       | 09:40   |
+| `MORNING_END`           | 上午常规时段结束时间       | 11:30   |
+| `MORNING_INTERVAL_SECONDS` | 上午常规时段检查间隔（秒） | 180   |
+| `AFTERNOON_START`       | 下午常规时段开始时间       | 13:00   |
+| `AFTERNOON_END`         | 下午常规时段结束时间       | 15:00   |
+| `AFTERNOON_INTERVAL_SECONDS` | 下午常规时段检查间隔（秒） | 180 |
+| `DEFAULT_INTERVAL_SECONDS` | 其他时间检查间隔（秒）   | 1800    |
 
 **注意**：`.env` 文件包含敏感信息，已被 `.gitignore` 忽略，不会提交到 Git。

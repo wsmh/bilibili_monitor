@@ -1,8 +1,21 @@
 import unittest
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from monitor import BilibiliMonitor, get_check_interval_for_datetime
+from monitor import (
+    AFTERNOON_INTERVAL_SECONDS,
+    AFTERNOON_START,
+    AFTERNOON_END,
+    BilibiliMonitor,
+    DEFAULT_INTERVAL_SECONDS,
+    MORNING_INTERVAL_SECONDS,
+    MORNING_START,
+    MORNING_END,
+    PEAK_END,
+    PEAK_INTERVAL_SECONDS,
+    PEAK_START,
+    get_check_interval_for_datetime,
+)
 
 
 class MonitorScheduleTestCase(unittest.TestCase):
@@ -12,13 +25,34 @@ class MonitorScheduleTestCase(unittest.TestCase):
         self.assertEqual(get_check_interval_for_datetime(dt), 30)
 
     def test_morning_and_afternoon_windows_use_three_minutes(self):
-        self.assertEqual(get_check_interval_for_datetime(datetime(2026, 4, 1, 9, 5, 0)), 180)
+        self.assertEqual(get_check_interval_for_datetime(datetime(2026, 4, 1, 9, 40, 0)), 180)
         self.assertEqual(get_check_interval_for_datetime(datetime(2026, 4, 1, 10, 45, 0)), 180)
         self.assertEqual(get_check_interval_for_datetime(datetime(2026, 4, 1, 14, 0, 0)), 180)
 
     def test_other_times_use_thirty_minutes(self):
         self.assertEqual(get_check_interval_for_datetime(datetime(2026, 4, 1, 8, 30, 0)), 1800)
         self.assertEqual(get_check_interval_for_datetime(datetime(2026, 4, 1, 16, 0, 0)), 1800)
+
+    def test_schedule_can_be_overridden_from_config_constants(self):
+        with patch("monitor.PEAK_START", dt_time(8, 0)), patch(
+            "monitor.PEAK_END", dt_time(8, 20)
+        ), patch("monitor.PEAK_INTERVAL_SECONDS", 15), patch(
+            "monitor.MORNING_START", dt_time(8, 20)
+        ), patch(
+            "monitor.MORNING_END", dt_time(10, 0)
+        ), patch(
+            "monitor.MORNING_INTERVAL_SECONDS", 120
+        ), patch(
+            "monitor.AFTERNOON_START", dt_time(14, 0)
+        ), patch(
+            "monitor.AFTERNOON_END", dt_time(16, 0)
+        ), patch(
+            "monitor.AFTERNOON_INTERVAL_SECONDS", 240
+        ), patch("monitor.DEFAULT_INTERVAL_SECONDS", 900):
+            self.assertEqual(get_check_interval_for_datetime(datetime(2026, 4, 1, 8, 10, 0)), 15)
+            self.assertEqual(get_check_interval_for_datetime(datetime(2026, 4, 1, 9, 0, 0)), 120)
+            self.assertEqual(get_check_interval_for_datetime(datetime(2026, 4, 1, 15, 0, 0)), 240)
+            self.assertEqual(get_check_interval_for_datetime(datetime(2026, 4, 1, 18, 0, 0)), 900)
 
 
 class MonitorStartupBannerTestCase(unittest.TestCase):
@@ -54,6 +88,50 @@ class MonitorStartupBannerTestCase(unittest.TestCase):
         self.assertIn("09:20-09:40 每30秒", printed_output)
         self.assertNotIn("super-secret-token", printed_output)
         self.assertNotIn("open.feishu.cn/open-apis/bot/v2/hook", printed_output)
+
+    @patch("builtins.print")
+    @patch("monitor.CommentStorage")
+    @patch("monitor.FeishuBot")
+    @patch("monitor.BilibiliAPI")
+    def test_startup_banner_uses_configured_schedule_text(
+        self,
+        mock_bilibili_api,
+        mock_feishu_bot,
+        mock_comment_storage,
+        mock_print,
+    ):
+        api_instance = mock_bilibili_api.return_value
+        api_instance.has_auth.return_value = False
+        api_instance.fetch_mode = "browser"
+        mock_feishu_bot.return_value = MagicMock()
+        mock_comment_storage.return_value = MagicMock()
+
+        with patch("monitor.PEAK_START", dt_time(8, 0)), patch(
+            "monitor.PEAK_END", dt_time(8, 20)
+        ), patch("monitor.PEAK_INTERVAL_SECONDS", 15), patch(
+            "monitor.MORNING_START", dt_time(8, 20)
+        ), patch(
+            "monitor.MORNING_END", dt_time(10, 0)
+        ), patch(
+            "monitor.MORNING_INTERVAL_SECONDS", 120
+        ), patch(
+            "monitor.AFTERNOON_START", dt_time(14, 0)
+        ), patch(
+            "monitor.AFTERNOON_END", dt_time(16, 0)
+        ), patch(
+            "monitor.AFTERNOON_INTERVAL_SECONDS", 240
+        ), patch("monitor.DEFAULT_INTERVAL_SECONDS", 900):
+            BilibiliMonitor()
+
+        printed_output = "\n".join(
+            " ".join(str(arg) for arg in call.args)
+            for call in mock_print.call_args_list
+        )
+
+        self.assertIn("08:00-08:20 每15秒", printed_output)
+        self.assertIn("08:20-10:00 每2分钟", printed_output)
+        self.assertIn("14:00-16:00 每4分钟", printed_output)
+        self.assertIn("其余每15分钟", printed_output)
 
 
 class MonitorStartupNotificationTestCase(unittest.IsolatedAsyncioTestCase):

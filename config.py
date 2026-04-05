@@ -1,8 +1,17 @@
 import os
+from datetime import datetime, time as dt_time
 from dotenv import load_dotenv
 
 # 加载 .env 文件
 load_dotenv()
+
+
+def _parse_time_env(name: str, default: str) -> dt_time:
+    value = os.getenv(name, default).strip()
+    try:
+        return datetime.strptime(value, "%H:%M").time()
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须是 HH:MM 格式，当前值: {value!r}") from exc
 
 # ============================================
 # 私密配置 - 请在 .env 文件中设置这些值
@@ -45,3 +54,18 @@ SECURITY_COOLDOWN_SECONDS = int(os.getenv("SECURITY_COOLDOWN_SECONDS", "120"))
 COMMENT_MAX_PAGES_AUTH = int(os.getenv("COMMENT_MAX_PAGES_AUTH", "2"))
 COMMENT_MAX_PAGES_GUEST = int(os.getenv("COMMENT_MAX_PAGES_GUEST", "1"))
 DATA_FILE = os.getenv("DATA_FILE", "notified_comments.json")  # 已通知评论记录文件
+
+# 轮询时段配置
+PEAK_START = _parse_time_env("PEAK_START", "09:20")
+PEAK_END = _parse_time_env("PEAK_END", "09:40")
+PEAK_INTERVAL_SECONDS = int(os.getenv("PEAK_INTERVAL_SECONDS", "30"))
+
+MORNING_START = _parse_time_env("MORNING_START", "09:40")
+MORNING_END = _parse_time_env("MORNING_END", "11:30")
+MORNING_INTERVAL_SECONDS = int(os.getenv("MORNING_INTERVAL_SECONDS", "180"))
+
+AFTERNOON_START = _parse_time_env("AFTERNOON_START", "13:00")
+AFTERNOON_END = _parse_time_env("AFTERNOON_END", "15:00")
+AFTERNOON_INTERVAL_SECONDS = int(os.getenv("AFTERNOON_INTERVAL_SECONDS", "180"))
+
+DEFAULT_INTERVAL_SECONDS = int(os.getenv("DEFAULT_INTERVAL_SECONDS", "1800"))
