@@ -3,6 +3,7 @@ from typing import Dict, List, Optional
 
 
 SPACE_VIDEO_RESPONSE_KEYWORD = "/x/space/wbi/arc/search"
+LOGIN_STATUS_URL = "https://api.bilibili.com/x/web-interface/nav"
 
 STEALTH_INIT_SCRIPT = """
 Object.defineProperty(navigator, 'webdriver', {
@@ -235,11 +236,28 @@ class BrowserBilibiliFetcher:
         if not cookies:
             return None
 
-        dedeuserid = next((cookie["value"] for cookie in cookies if cookie["name"] == "DedeUserID"), None)
-        return {
-            "mid": dedeuserid,
-            "uname": None,
-        }
+        context = await self._ensure_context()
+        page = await context.new_page()
+        try:
+            response = await page.goto(
+                LOGIN_STATUS_URL,
+                wait_until="domcontentloaded",
+                timeout=self.timeout_ms,
+            )
+            if not response:
+                return None
+
+            payload = await response.json()
+            data = payload.get("data", {})
+            if payload.get("code") != 0 or not data.get("isLogin"):
+                return None
+
+            return {
+                "mid": data.get("mid"),
+                "uname": data.get("uname"),
+            }
+        finally:
+            await page.close()
 
     async def close(self):
         if self._context:

@@ -31,6 +31,10 @@ def get_check_interval_for_datetime(current: datetime) -> int:
     return 1800
 
 
+def get_masked_webhook_status(webhook_url: str) -> str:
+    return "已配置" if webhook_url.strip() else "未配置"
+
+
 class BilibiliMonitor:
     """B站UP主评论监控器"""
     
@@ -47,8 +51,8 @@ class BilibiliMonitor:
         print("🎬 B站UP主评论监控器")
         print("=" * 60)
         print(f"👤 监控UP主UID: {UP_UID}")
-        print(f"🤖 飞书Webhook: {FEISHU_WEBHOOK[:50]}...")
-        print("⏱️  检查策略: 09:20-09:40 每10秒, 09:00-11:30/13:00-15:00 每3分钟, 其余每30分钟")
+        print(f"🤖 飞书Webhook: {get_masked_webhook_status(FEISHU_WEBHOOK)}")
+        print("⏱️  检查策略: 09:20-09:40 每30秒, 09:00-11:30/13:00-15:00 每3分钟, 其余每30分钟")
         print(f"💾 数据文件: {DATA_FILE}")
         print(f"🔐 B站登录态: {'已配置' if self.bilibili.has_auth() else '未配置'}")
         print(f"🌐 抓取模式: {self.bilibili.fetch_mode}")
