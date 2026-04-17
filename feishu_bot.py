@@ -111,7 +111,7 @@ class FeishuBot:
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"{comment_type} **{comment_time}** | 👍 {comment['like']}\n> {comment['content'][:100]}{'...' if len(comment['content']) > 100 else ''}"
+                    "content": f"{comment_type} **{comment_time}** | 👍 {comment['like']}\n> {comment['content']}"
                 }
             })
             elements.append({

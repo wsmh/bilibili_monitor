@@ -32,7 +32,7 @@ async def test():
             print(f'✅ UP主评论数量: {len(up_comments)}')
             
             if up_comments:
-                print(f'   内容: {up_comments[0]["content"][:100]}...')
+                print(f'   内容: {up_comments[0]["content"]}')
             else:
                 print('   ℹ️ UP主暂未发表评论')
         else:
