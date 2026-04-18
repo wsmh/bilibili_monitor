@@ -6,7 +6,10 @@ import requests
 from bilibili_api import Credential, comment, user
 from bilibili_api.comment import CommentResourceType
 
-from browser_fetcher import BrowserBilibiliFetcher
+from browser_fetcher import (
+    BrowserBilibiliFetcher,
+    extract_latest_post_from_space_dynamic_payload,
+)
 from config import (
     BILI_BILI_JCT,
     BILI_BROWSER_EXECUTABLE,
@@ -20,6 +23,13 @@ from config import (
     BILI_SESSDATA,
     COMMENT_MAX_PAGES_AUTH,
     COMMENT_MAX_PAGES_GUEST,
+)
+
+
+SPACE_DYNAMIC_FEED_URL = "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space"
+SPACE_DYNAMIC_FEATURES = (
+    "itemOpusStyle,listOnlyfans,opusBigCover,onlyfansVote,forwardListHidden,"
+    "decorationCard,commentsNewVersion,onlyfansAssetsV2,ugcDelete,onlyfansQaCard"
 )
 
 
@@ -263,6 +273,45 @@ class BilibiliAPI:
             print(f"获取最新视频失败: {exc}")
             return None
 
+    async def _get_latest_post_from_space_feed(self, uid: int) -> Optional[Dict]:
+        if not self.has_auth() or not self.cookie_string:
+            return None
+
+        def _do_request() -> Dict:
+            headers = {
+                "User-Agent": self._get_random_ua(),
+                "Referer": f"https://space.bilibili.com/{uid}/dynamic",
+                "Cookie": self.cookie_string,
+            }
+            response = requests.get(
+                SPACE_DYNAMIC_FEED_URL,
+                params={
+                    "host_mid": str(uid),
+                    "platform": "web",
+                    "features": SPACE_DYNAMIC_FEATURES,
+                },
+                headers=headers,
+                timeout=10,
+            )
+            if response.status_code == 412:
+                raise Exception("412 - The request was rejected because of the bilibili security control policy")
+            response.raise_for_status()
+            return response.json()
+
+        payload = await self._retry_with_backoff(
+            lambda: asyncio.to_thread(_do_request),
+            max_retries=3,
+            base_delay=0.5,
+        )
+
+        if payload.get("code") != 0:
+            code = payload.get("code")
+            if code == -101:
+                return None
+            raise Exception(f"space feed api failed: code={code} message={payload.get('message')}")
+
+        return extract_latest_post_from_space_dynamic_payload(payload)
+
     async def get_latest_post(self, uid: int) -> Optional[Dict]:
         """获取 UP 主最新发布内容（视频/动态/充电相关动态）。
 
@@ -276,6 +325,13 @@ class BilibiliAPI:
                     return post
             except Exception as exc:
                 print(f"浏览器抓取空间动态失败: {exc}")
+
+        try:
+            post = await self._get_latest_post_from_space_feed(uid)
+            if post:
+                return post
+        except Exception as exc:
+            print(f"API抓取空间动态失败: {exc}")
 
         video = await self.get_latest_video(uid)
         if not video:
@@ -351,6 +407,8 @@ class BilibiliAPI:
                         "ctime": reply["ctime"],
                         "like": reply["count"],
                         "parent": reply.get("parent", 0),
+                        "root": reply.get("root", 0) or 0,
+                        "dialog": reply.get("dialog", 0) or 0,
                     }
                     if comment_data["rpid"] not in seen_rpids:
                         comments_acc.append(comment_data)
@@ -365,7 +423,9 @@ class BilibiliAPI:
                                 "content": sub_reply["content"]["message"],
                                 "ctime": sub_reply["ctime"],
                                 "like": sub_reply["count"],
-                                "parent": reply["rpid"],
+                                "parent": sub_reply.get("parent", reply["rpid"]) or reply["rpid"],
+                                "root": sub_reply.get("root", reply["rpid"]) or reply["rpid"],
+                                "dialog": sub_reply.get("dialog", 0) or 0,
                             }
                             if sub_comment["rpid"] not in seen_rpids:
                                 comments_acc.append(sub_comment)
@@ -446,6 +506,8 @@ class BilibiliAPI:
                         "ctime": reply.get("ctime", 0),
                         "like": reply.get("like", reply.get("count", 0)),
                         "parent": reply.get("parent", 0) or 0,
+                        "root": reply.get("root", 0) or 0,
+                        "dialog": reply.get("dialog", 0) or 0,
                     }
                     if comment_data["rpid"] not in seen_rpids:
                         comments_acc.append(comment_data)
@@ -459,7 +521,9 @@ class BilibiliAPI:
                             "content": sub_reply.get("content", {}).get("message", ""),
                             "ctime": sub_reply.get("ctime", 0),
                             "like": sub_reply.get("like", sub_reply.get("count", 0)),
-                            "parent": reply["rpid"],
+                            "parent": sub_reply.get("parent", reply["rpid"]) or reply["rpid"],
+                            "root": sub_reply.get("root", reply["rpid"]) or reply["rpid"],
+                            "dialog": sub_reply.get("dialog", 0) or 0,
                         }
                         if sub_comment["rpid"] not in seen_rpids:
                             comments_acc.append(sub_comment)
@@ -474,6 +538,160 @@ class BilibiliAPI:
             print(f"获取评论失败: {exc}")
 
         return comments_acc
+
+    async def _get_reply_thread_map_via_http(
+        self,
+        oid: int,
+        type_code: int,
+        root_rpid: int,
+        max_pages: int = 3,
+    ) -> Dict[int, Dict]:
+        """获取某个 root 评论线程下的评论映射，用于补齐“回复原文”。"""
+
+        def _do_request(pn: int) -> Dict:
+            headers = {
+                "User-Agent": self._get_random_ua(),
+                "Referer": "https://www.bilibili.com",
+            }
+            if self.cookie_string:
+                headers["Cookie"] = self.cookie_string
+
+            response = requests.get(
+                "https://api.bilibili.com/x/v2/reply/reply",
+                params={
+                    "type": type_code,
+                    "oid": oid,
+                    "root": root_rpid,
+                    "ps": 20,
+                    "pn": pn,
+                },
+                headers=headers,
+                timeout=10,
+            )
+            if response.status_code == 412:
+                raise Exception("412 - The request was rejected because of the bilibili security control policy")
+            response.raise_for_status()
+            return response.json()
+
+        def _normalize(item: Dict) -> Dict:
+            member = item.get("member", {})
+            content = item.get("content", {})
+            return {
+                "rpid": item.get("rpid"),
+                "mid": member.get("mid"),
+                "uname": member.get("uname", ""),
+                "content": content.get("message", ""),
+                "ctime": item.get("ctime", 0),
+                "like": item.get("like", item.get("count", 0)),
+                "parent": item.get("parent", 0) or 0,
+                "root": item.get("root", 0) or 0,
+                "dialog": item.get("dialog", 0) or 0,
+            }
+
+        mapping: Dict[int, Dict] = {}
+        page = 1
+
+        while page <= max_pages:
+            payload = await self._retry_with_backoff(
+                lambda: asyncio.to_thread(_do_request, page),
+                max_retries=3,
+                base_delay=0.5,
+            )
+
+            if payload.get("code") != 0:
+                break
+
+            data = payload.get("data") or {}
+
+            root_item = data.get("root")
+            if isinstance(root_item, dict) and root_item.get("rpid"):
+                normalized = _normalize(root_item)
+                if normalized.get("rpid") is not None:
+                    mapping[int(normalized["rpid"])] = normalized
+
+            replies = data.get("replies") or []
+            if not replies:
+                break
+
+            for reply in replies:
+                if not isinstance(reply, dict) or not reply.get("rpid"):
+                    continue
+                normalized = _normalize(reply)
+                mapping[int(normalized["rpid"])] = normalized
+
+                for sub_reply in reply.get("replies") or []:
+                    if not isinstance(sub_reply, dict) or not sub_reply.get("rpid"):
+                        continue
+                    normalized_sub = _normalize(sub_reply)
+                    mapping[int(normalized_sub["rpid"])] = normalized_sub
+
+            page += 1
+
+        return mapping
+
+    async def enrich_reply_context(
+        self,
+        post: Dict,
+        target_comments: List[Dict],
+        all_comments: List[Dict],
+    ) -> None:
+        """如果 UP 主评论是回复，则补齐其回复的原评论内容。"""
+
+        if not target_comments:
+            return
+
+        comment_type = int(post.get("comment_type") or 0)
+        comment_oid = post.get("comment_oid")
+        if not comment_type or comment_oid is None:
+            return
+
+        mapping: Dict[int, Dict] = {
+            int(item["rpid"]): item
+            for item in all_comments
+            if isinstance(item, dict) and item.get("rpid") is not None
+        }
+
+        thread_cache: Dict[int, Dict[int, Dict]] = {}
+
+        for item in target_comments:
+            parent = int(item.get("parent") or 0)
+            if parent == 0:
+                continue
+
+            parent_comment = mapping.get(parent)
+            if parent_comment:
+                item["reply_to"] = {
+                    "uname": parent_comment.get("uname", ""),
+                    "content": parent_comment.get("content", ""),
+                }
+                continue
+
+            root = int(item.get("root") or 0)
+            if root == 0:
+                item["reply_to"] = {"uname": "", "content": "（未获取到被回复的原评论）"}
+                continue
+
+            thread_map = thread_cache.get(root)
+            if thread_map is None:
+                try:
+                    thread_map = await self._get_reply_thread_map_via_http(
+                        int(comment_oid),
+                        comment_type,
+                        root,
+                    )
+                except Exception as exc:
+                    print(f"获取回复上下文失败(root={root}): {exc}")
+                    thread_map = {}
+                thread_cache[root] = thread_map
+
+            parent_comment = thread_map.get(parent)
+            if parent_comment:
+                item["reply_to"] = {
+                    "uname": parent_comment.get("uname", ""),
+                    "content": parent_comment.get("content", ""),
+                }
+            else:
+                item["reply_to"] = {"uname": "", "content": "（未获取到被回复的原评论）"}
 
     async def get_post_comments(self, post: Dict) -> List[Dict]:
         """获取某条内容（视频/动态）下的评论。"""

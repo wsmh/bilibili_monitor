@@ -201,7 +201,11 @@ class BilibiliMonitor:
                 "kind": kind,
                 "title": title,
                 "link": link,
+                "comment_type": post.get("comment_type"),
+                "comment_oid": post.get("comment_oid"),
             }
+
+            await self.bilibili.enrich_reply_context(post, new_comments, comments)
 
             if len(new_comments) == 1:
                 success = self.feishu.send_up_comment(post_info, new_comments[0])

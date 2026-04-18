@@ -18,6 +18,20 @@ def resolve_resource_labels(resource_info: Dict) -> Dict[str, str]:
     }
 
 
+def build_reply_to_markdown(reply_to: Dict) -> str:
+    if not reply_to:
+        return ""
+
+    content = (reply_to.get("content") or "").strip()
+    if not content:
+        return ""
+
+    uname = (reply_to.get("uname") or "").strip()
+    if uname:
+        return f"回复 **{uname}**：\n> {content}"
+    return f"回复原评论：\n> {content}"
+
+
 class FeishuBot:
     """飞书机器人推送"""
 
@@ -47,6 +61,61 @@ class FeishuBot:
 
         title = resource_info.get("title", "")
 
+        elements: List[Dict] = [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**{comment_type}**\n🕐 {comment_time}",
+                },
+            }
+        ]
+
+        reply_to_md = build_reply_to_markdown(comment.get("reply_to"))
+        if reply_to_md:
+            elements.append(
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": reply_to_md,
+                    },
+                }
+            )
+
+        elements.extend(
+            [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"👤 **{comment['uname']}**",
+                    },
+                },
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"> {comment['content']}",
+                    },
+                },
+                {
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "text": {
+                                "tag": "plain_text",
+                                "content": labels["button"],
+                            },
+                            "type": "primary",
+                            "url": resource_info["link"],
+                        }
+                    ],
+                },
+            ]
+        )
+
         payload = {
             "msg_type": "interactive",
             "card": {
@@ -62,43 +131,7 @@ class FeishuBot:
                     },
                     "template": labels["template"],
                 },
-                "elements": [
-                    {
-                        "tag": "div",
-                        "text": {
-                            "tag": "lark_md",
-                            "content": f"**{comment_type}**\n🕐 {comment_time}",
-                        },
-                    },
-                    {
-                        "tag": "div",
-                        "text": {
-                            "tag": "lark_md",
-                            "content": f"👤 **{comment['uname']}**",
-                        },
-                    },
-                    {
-                        "tag": "div",
-                        "text": {
-                            "tag": "lark_md",
-                            "content": f"> {comment['content']}",
-                        },
-                    },
-                    {
-                        "tag": "action",
-                        "actions": [
-                            {
-                                "tag": "button",
-                                "text": {
-                                    "tag": "plain_text",
-                                    "content": labels["button"],
-                                },
-                                "type": "primary",
-                                "url": resource_info["link"],
-                            }
-                        ],
-                    },
-                ],
+                "elements": elements,
             },
         }
 
@@ -112,7 +145,8 @@ class FeishuBot:
 
         labels = resolve_resource_labels(resource_info)
 
-        elements = []
+        elements: List[Dict] = []
+
         for comment in comments:
             comment_time = datetime.fromtimestamp(comment["ctime"]).strftime("%m-%d %H:%M")
 
@@ -121,12 +155,22 @@ class FeishuBot:
             else:
                 comment_type = "↩️"
 
+            reply_to_md = build_reply_to_markdown(comment.get("reply_to"))
+            if reply_to_md:
+                content = (
+                    f"{comment_type} **{comment_time}** | 👍 {comment['like']}\n"
+                    f"{reply_to_md}\n"
+                    f"> {comment['content']}"
+                )
+            else:
+                content = f"{comment_type} **{comment_time}** | 👍 {comment['like']}\n> {comment['content']}"
+
             elements.append(
                 {
                     "tag": "div",
                     "text": {
                         "tag": "lark_md",
-                        "content": f"{comment_type} **{comment_time}** | 👍 {comment['like']}\n> {comment['content']}",
+                        "content": content,
                     },
                 }
             )

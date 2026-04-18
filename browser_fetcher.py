@@ -116,6 +116,8 @@ def _normalize_single_comment(comment: Dict) -> Optional[Dict]:
         "ctime": comment.get("ctime", 0),
         "like": comment.get("like", comment.get("count", 0)),
         "parent": parent,
+        "root": comment.get("root", 0) or 0,
+        "dialog": comment.get("dialog", 0) or 0,
     }
 
 

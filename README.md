@@ -53,6 +53,14 @@ python monitor.py
 
 充电专属内容需要配置 `BILI_COOKIE`，且该 Cookie 对应的账号必须具备查看该 UP 充电内容的权限，否则评论区可能返回空或报权限不足。
 
+如果你的服务器环境无法安装/下载 Playwright 浏览器（例如内网网关拦截大文件下载），可以先用：
+
+```env
+BILI_FETCH_MODE=api
+```
+
+此时程序会通过 `x/polymer/web-dynamic/v1/feed/space` 拉取空间动态流来发现最新内容（含充电相关内容），不依赖浏览器；评论抓取会优先走 reply 接口。
+
 如果你想强制改回 API 模式，修改 `.env` 文件：
 
 ```bash
