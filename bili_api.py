@@ -147,13 +147,48 @@ class BilibiliAPI:
         )
 
     async def validate_login(self) -> Optional[Dict]:
-        """验证当前登录态是否可用"""
+        """验证当前登录态是否可用。
+
+        说明：bilibili-api-python 在部分环境下需要额外安装 http 客户端（curl_cffi/httpx/aiohttp）。
+        为了让脚本在服务器环境更稳，这里优先用 nav 接口做轻量校验；失败再回退到 bilibili-api-python。
+        """
 
         if self.prefers_browser_fetch():
             return await self.browser_fetcher.get_login_hint()
 
-        if not self.has_auth():
+        if not self.has_auth() or not self.cookie_string:
             return None
+
+        def _do_request() -> Optional[Dict]:
+            headers = {
+                "User-Agent": self._get_random_ua(),
+                "Referer": "https://www.bilibili.com",
+                "Cookie": self.cookie_string,
+            }
+            response = requests.get(
+                "https://api.bilibili.com/x/web-interface/nav",
+                headers=headers,
+                timeout=10,
+            )
+            if response.status_code == 412:
+                raise Exception("412 - The request was rejected because of the bilibili security control policy")
+            response.raise_for_status()
+            payload = response.json()
+            data = payload.get("data", {})
+            if payload.get("code") != 0 or not data.get("isLogin"):
+                return None
+            return {
+                "mid": data.get("mid"),
+                "uname": data.get("uname"),
+            }
+
+        try:
+            info = await asyncio.to_thread(_do_request)
+            if info:
+                return info
+        except Exception as exc:
+            # 轻量校验失败不应中断主流程
+            print(f"⚠️ nav 登录态校验失败: {exc}")
 
         try:
             info = await user.get_self_info(self.credential)
@@ -162,10 +197,8 @@ class BilibiliAPI:
                 "uname": info.get("name") or info.get("uname"),
             }
         except Exception as exc:
-            if self._is_auth_error(exc):
-                print(f"⚠️ B站登录态校验失败: {exc}")
-                return None
-            raise
+            print(f"⚠️ bilibili-api 登录态校验失败: {exc}")
+            return None
 
     async def get_user_profile(self, uid: int) -> Optional[Dict]:
         """获取指定 UID 的用户信息，用于通知文案等非关键路径。"""
@@ -692,6 +725,64 @@ class BilibiliAPI:
                 }
             else:
                 item["reply_to"] = {"uname": "", "content": "（未获取到被回复的原评论）"}
+
+    async def get_up_replies_from_tracked_threads(
+        self,
+        post: Dict,
+        roots: List[int],
+        up_uid: int,
+        max_pages: int,
+    ) -> List[Dict]:
+        """扫描被跟踪的 root 评论线程，补齐 UP 主在同一条评论下多次回复的场景。"""
+
+        if not roots:
+            return []
+
+        comment_type = int(post.get("comment_type") or 0)
+        comment_oid = post.get("comment_oid")
+        if not comment_type or comment_oid is None:
+            return []
+
+        up_uid_str = str(up_uid)
+        results: List[Dict] = []
+        seen_rpids = set()
+
+        for root in roots:
+            if not root:
+                continue
+
+            try:
+                thread_map = await self._get_reply_thread_map_via_http(
+                    int(comment_oid),
+                    comment_type,
+                    int(root),
+                    max_pages=max_pages,
+                )
+            except Exception as exc:
+                print(f"扫描评论线程失败(root={root}): {exc}")
+                continue
+
+            for item in thread_map.values():
+                if str(item.get("mid")) != up_uid_str:
+                    continue
+
+                rpid = item.get("rpid")
+                if rpid is None or rpid in seen_rpids:
+                    continue
+
+                parent = int(item.get("parent") or 0)
+                if parent and not item.get("reply_to"):
+                    parent_comment = thread_map.get(parent)
+                    if parent_comment:
+                        item["reply_to"] = {
+                            "uname": parent_comment.get("uname", ""),
+                            "content": parent_comment.get("content", ""),
+                        }
+
+                results.append(item)
+                seen_rpids.add(rpid)
+
+        return sorted(results, key=lambda entry: entry.get("ctime", 0), reverse=True)
 
     async def get_post_comments(self, post: Dict) -> List[Dict]:
         """获取某条内容（视频/动态）下的评论。"""

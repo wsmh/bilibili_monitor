@@ -55,6 +55,13 @@ COMMENT_MAX_PAGES_AUTH = int(os.getenv("COMMENT_MAX_PAGES_AUTH", "2"))
 COMMENT_MAX_PAGES_GUEST = int(os.getenv("COMMENT_MAX_PAGES_GUEST", "1"))
 DATA_FILE = os.getenv("DATA_FILE", "notified_comments.json")  # 已通知评论记录文件
 
+# 补齐 UP 主楼中楼多次回复：跟踪最近若干个被回复的 root 评论线程，定期扫描新回复。
+TRACKED_THREAD_SCAN_ENABLED = (
+    os.getenv("TRACKED_THREAD_SCAN_ENABLED", "true").strip().lower() != "false"
+)
+TRACKED_THREAD_MAX_ROOTS = int(os.getenv("TRACKED_THREAD_MAX_ROOTS", "5"))
+TRACKED_THREAD_MAX_PAGES = int(os.getenv("TRACKED_THREAD_MAX_PAGES", "3"))
+
 # 轮询时段配置
 PEAK_START = _parse_time_env("PEAK_START", "09:20")
 PEAK_END = _parse_time_env("PEAK_END", "09:40")

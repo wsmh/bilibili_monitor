@@ -61,6 +61,8 @@ BILI_FETCH_MODE=api
 
 此时程序会通过 `x/polymer/web-dynamic/v1/feed/space` 拉取空间动态流来发现最新内容（含充电相关内容），不依赖浏览器；评论抓取会优先走 reply 接口。
 
+如果你发现 UP 在同一个评论线程下连续回复多次但偶尔漏推送，可以开启/调整线程扫描（默认开启）：`TRACKED_THREAD_SCAN_ENABLED/TRACKED_THREAD_MAX_ROOTS/TRACKED_THREAD_MAX_PAGES`。
+
 如果你想强制改回 API 模式，修改 `.env` 文件：
 
 ```bash

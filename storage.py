@@ -10,6 +10,8 @@ class CommentStorage:
 
     - 当监控到发布了新内容（视频/动态/充电相关动态等）时，会切换 current_post_key
       并清空已通知的 rpid 集合。
+    - tracked_roots 用于补齐“UP 在同一个评论线程下多次回复”的场景：
+      记录最近若干个被回复的 root 评论 rpid，后续轮询时可额外扫描这些线程。
     - 为兼容旧版本数据文件，会在加载时识别 legacy 字段。
     """
 
@@ -17,14 +19,15 @@ class CommentStorage:
         self.filepath = filepath
         self.notified_rpids: Set[int] = set()
         self.current_post_key: Optional[str] = None
+        self.tracked_roots: List[int] = []
         self._load()
 
     def _load(self):
-        """从文件加载已通知的评论ID"""
         if not os.path.exists(self.filepath):
             print("📂 没有找到历史记录文件，将创建新文件")
             self.notified_rpids = set()
             self.current_post_key = None
+            self.tracked_roots = []
             return
 
         try:
@@ -34,12 +37,14 @@ class CommentStorage:
             print(f"⚠️ 加载历史记录失败: {exc}")
             self.notified_rpids = set()
             self.current_post_key = None
+            self.tracked_roots = []
             return
 
         # 新格式
         if "current_post_key" in data:
             self.current_post_key = data.get("current_post_key")
             self.notified_rpids = set(data.get("rpids", []))
+            self.tracked_roots = [int(x) for x in data.get("tracked_roots", []) if str(x).isdigit()]
             print(f"📂 已加载 {len(self.notified_rpids)} 条历史评论记录")
             return
 
@@ -47,10 +52,10 @@ class CommentStorage:
         self.notified_rpids = set(data.get("rpids", []))
         legacy_bvid = data.get("current_video_bvid")
         self.current_post_key = f"video:{legacy_bvid}" if legacy_bvid else None
+        self.tracked_roots = []
         print(f"📂 已加载 {len(self.notified_rpids)} 条历史评论记录")
 
     def _save(self):
-        """保存已通知的评论ID到文件"""
         try:
             directory = os.path.dirname(self.filepath)
             if directory:
@@ -59,6 +64,7 @@ class CommentStorage:
             data: Dict = {
                 "rpids": list(self.notified_rpids),
                 "current_post_key": self.current_post_key,
+                "tracked_roots": self.tracked_roots,
             }
 
             # 为了让旧版本还能读取（可选）
@@ -71,17 +77,16 @@ class CommentStorage:
             print(f"⚠️ 保存历史记录失败: {exc}")
 
     def is_new_post(self, post_key: str) -> bool:
-        """检查是否是新内容"""
         return self.current_post_key != post_key
 
     def switch_post(self, post_key: str):
-        """切换到新内容，清空旧记录"""
         if self.current_post_key == post_key:
             return
 
         print(f"🆕 检测到新内容: {post_key}")
         print("🗑️ 清空旧内容的评论记录")
         self.notified_rpids.clear()
+        self.tracked_roots.clear()
         self.current_post_key = post_key
         self._save()
 
@@ -95,23 +100,46 @@ class CommentStorage:
     def switch_video(self, bvid: str):
         self.switch_post(f"video:{bvid}")
 
+    # ----------------------------
+    # Dedup
+    # ----------------------------
+
     def is_notified(self, rpid: int) -> bool:
-        """检查评论是否已通知过"""
         return rpid in self.notified_rpids
 
     def mark_notified(self, rpid: int):
-        """标记评论为已通知"""
         self.notified_rpids.add(rpid)
         self._save()
 
     def mark_multiple_notified(self, rpids: List[int]):
-        """批量标记评论为已通知"""
         self.notified_rpids.update(rpids)
         self._save()
 
+    # ----------------------------
+    # Thread tracking
+    # ----------------------------
+
+    def get_tracked_roots(self) -> List[int]:
+        return list(self.tracked_roots)
+
+    def track_root(self, root_rpid: int, max_roots: int):
+        if not root_rpid:
+            return
+
+        root_rpid = int(root_rpid)
+        self.tracked_roots = [value for value in self.tracked_roots if value != root_rpid]
+        self.tracked_roots.insert(0, root_rpid)
+        if max_roots > 0:
+            self.tracked_roots = self.tracked_roots[:max_roots]
+        self._save()
+
+    def track_roots(self, roots: List[int], max_roots: int):
+        for root in roots:
+            self.track_root(root, max_roots)
+
     def get_stats(self) -> Dict:
-        """获取统计信息"""
         return {
             "total_notified": len(self.notified_rpids),
             "current_post_key": self.current_post_key,
+            "tracked_roots": self.tracked_roots,
         }

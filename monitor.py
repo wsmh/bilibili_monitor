@@ -18,6 +18,9 @@ from config import (
     PEAK_INTERVAL_SECONDS,
     PEAK_START,
     SECURITY_COOLDOWN_SECONDS,
+    TRACKED_THREAD_MAX_PAGES,
+    TRACKED_THREAD_MAX_ROOTS,
+    TRACKED_THREAD_SCAN_ENABLED,
     UP_UID,
 )
 from feishu_bot import FeishuBot
@@ -180,10 +183,41 @@ class BilibiliMonitor:
 
             print(f"💬 本轮获取到 {len(comments)} 条最新评论/回复")
 
+            tracked_up_comments = []
+            if TRACKED_THREAD_SCAN_ENABLED:
+                tracked_up_comments = await self.bilibili.get_up_replies_from_tracked_threads(
+                    post,
+                    self.storage.get_tracked_roots(),
+                    UP_UID,
+                    TRACKED_THREAD_MAX_PAGES,
+                )
+
             up_comments = self.bilibili.filter_up_comments(comments, UP_UID)
+            if tracked_up_comments:
+                merged = {comment["rpid"]: comment for comment in up_comments}
+                for comment in tracked_up_comments:
+                    merged.setdefault(comment["rpid"], comment)
+                up_comments = sorted(
+                    merged.values(),
+                    key=lambda item: item.get("ctime", 0),
+                    reverse=True,
+                )
+
             if not up_comments:
                 print("📝 UP主暂未发表评论")
                 return
+
+            # 记录被回复的根评论，后续补齐同线程多次回复
+            if TRACKED_THREAD_SCAN_ENABLED:
+                roots = []
+                for comment in up_comments:
+                    parent = int(comment.get("parent") or 0)
+                    if parent == 0:
+                        continue
+                    root = int(comment.get("root") or parent)
+                    roots.append(root)
+                if roots:
+                    self.storage.track_roots(roots, TRACKED_THREAD_MAX_ROOTS)
 
             print(f"📝 找到 {len(up_comments)} 条UP主评论")
 
