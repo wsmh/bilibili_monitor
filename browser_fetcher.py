@@ -4,6 +4,7 @@ from typing import Dict, List, Optional
 
 
 SPACE_VIDEO_RESPONSE_KEYWORD = "/x/space/wbi/arc/search"
+SPACE_DYNAMIC_RESPONSE_KEYWORD = "/x/polymer/web-dynamic/v1/feed/space"
 LOGIN_STATUS_URL = "https://api.bilibili.com/x/web-interface/nav"
 
 STEALTH_SCRIPT_TEMPLATE = """
@@ -137,6 +138,138 @@ def normalize_comment_component_payloads(payloads: List[Dict]) -> List[Dict]:
     return comments
 
 
+def _normalize_bilibili_url(url: str) -> str:
+    if not url:
+        return ""
+    url = url.strip()
+    if url.startswith("//"):
+        return f"https:{url}"
+    if url.startswith("/"):
+        return f"https://www.bilibili.com{url}"
+    return url
+
+
+def _build_dynamic_title(item: Dict) -> str:
+    modules = item.get("modules", {})
+    module_dynamic = modules.get("module_dynamic", {})
+    major = module_dynamic.get("major", {})
+    major_type = major.get("type")
+
+    if major_type == "MAJOR_TYPE_ARCHIVE":
+        archive = major.get("archive", {})
+        return archive.get("title") or "投稿视频"
+
+    if major_type == "MAJOR_TYPE_UGC_SEASON":
+        season = major.get("ugc_season", {})
+        return season.get("title") or "合集更新"
+
+    if major_type == "MAJOR_TYPE_UPOWER_COMMON":
+        upower = major.get("upower_common", {})
+        prefix = upower.get("title_prefix") or ""
+        title = upower.get("title") or "充电专属"
+        return f"{prefix}{title}".strip() or "充电专属"
+
+    # opus 图文动态
+    if major_type == "MAJOR_TYPE_OPUS":
+        opus = major.get("opus", {})
+        title = opus.get("title")
+        if title:
+            return title
+
+    desc = module_dynamic.get("desc", {}) or {}
+    text = (desc.get("text") or "").strip()
+    if text:
+        return text
+
+    return "UP主动态"
+
+
+def extract_latest_post_from_space_dynamic_payload(payload: Dict) -> Optional[Dict]:
+    items = payload.get("data", {}).get("items", [])
+    if not items:
+        return None
+
+    def pub_ts(item: Dict) -> int:
+        modules = item.get("modules", {})
+        author = modules.get("module_author", {})
+        return int(author.get("pub_ts") or 0)
+
+    # space feed 可能包含置顶动态，直接选 pub_ts 最大的那条
+    latest_item = max(items, key=pub_ts)
+
+    modules = latest_item.get("modules", {})
+    author = modules.get("module_author", {})
+    created = int(author.get("pub_ts") or 0)
+
+    basic = latest_item.get("basic", {})
+    comment_type = int(basic.get("comment_type") or 0)
+    comment_oid = basic.get("comment_id_str")
+    dynamic_id = latest_item.get("id_str")
+
+    link = _normalize_bilibili_url(basic.get("jump_url") or "")
+    module_dynamic = modules.get("module_dynamic", {})
+    major = module_dynamic.get("major", {})
+    major_type = major.get("type")
+
+    kind = "dynamic"
+    title = _build_dynamic_title(latest_item)
+
+    video_bvid = None
+    video_aid = None
+
+    if major_type == "MAJOR_TYPE_ARCHIVE":
+        archive = major.get("archive", {})
+        video_bvid = archive.get("bvid")
+        video_aid = archive.get("aid")
+        kind = "video"
+        title = archive.get("title") or title
+        link = _normalize_bilibili_url(archive.get("jump_url") or link)
+
+    if major_type == "MAJOR_TYPE_UGC_SEASON":
+        season = major.get("ugc_season", {})
+        video_aid = season.get("aid")
+        kind = "video"
+        title = season.get("title") or title
+        link = _normalize_bilibili_url(season.get("jump_url") or link)
+
+    if not link:
+        # 兜底：不同 major 的 jump_url 字段结构不同
+        for key in ("opus", "draw", "article", "common", "upower_common"):
+            entry = major.get(key)
+            if isinstance(entry, dict) and entry.get("jump_url"):
+                link = _normalize_bilibili_url(entry.get("jump_url"))
+                break
+
+    if kind == "video":
+        if video_aid is None and comment_type == 1 and comment_oid is not None:
+            video_aid = int(comment_oid)
+        if comment_oid is None and video_aid is not None:
+            comment_oid = str(video_aid)
+
+        if video_bvid:
+            post_key = f"video:{video_bvid}"
+        else:
+            post_key = f"video:av{video_aid}" if video_aid is not None else f"dynamic:{dynamic_id}"
+    else:
+        post_key = f"dynamic:{dynamic_id}" if dynamic_id else f"dynamic:{comment_type}:{comment_oid}"
+
+    if comment_oid is None:
+        return None
+
+    return {
+        "kind": kind,
+        "post_key": post_key,
+        "title": title,
+        "created": created,
+        "link": link,
+        "dynamic_id": dynamic_id,
+        "comment_type": comment_type,
+        "comment_oid": int(comment_oid),
+        "bvid": video_bvid,
+        "aid": int(video_aid) if video_aid is not None else None,
+    }
+
+
 def get_browser_executable_candidates(system_name: Optional[str] = None) -> List[str]:
     detected_system = (system_name or platform.system()).strip().lower()
     if detected_system == "windows":
@@ -248,11 +381,37 @@ class BrowserBilibiliFetcher:
         finally:
             await page.close()
 
-    async def get_video_comments(self, video_link: str) -> List[Dict]:
+    async def get_latest_post(self, uid: int) -> Optional[Dict]:
+        """从空间动态页抓取“最新发布内容”。
+
+        相比 /video 列表，space feed 往往更容易覆盖：动态、合集更新、充电相关内容等。
+        """
+
         context = await self._ensure_context()
         page = await context.new_page()
         try:
-            await page.goto(video_link, wait_until="domcontentloaded", timeout=self.timeout_ms)
+            async with page.expect_response(
+                lambda response: SPACE_DYNAMIC_RESPONSE_KEYWORD in response.url
+                and f"host_mid={uid}" in response.url,
+                timeout=self.timeout_ms,
+            ) as response_info:
+                await page.goto(
+                    f"https://space.bilibili.com/{uid}/dynamic",
+                    wait_until="domcontentloaded",
+                    timeout=self.timeout_ms,
+                )
+
+            response = await response_info.value
+            payload = await response.json()
+            return extract_latest_post_from_space_dynamic_payload(payload)
+        finally:
+            await page.close()
+
+    async def get_page_comments(self, link: str) -> List[Dict]:
+        context = await self._ensure_context()
+        page = await context.new_page()
+        try:
+            await page.goto(link, wait_until="domcontentloaded", timeout=self.timeout_ms)
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.72)")
             await page.wait_for_function(
                 """
@@ -272,6 +431,10 @@ class BrowserBilibiliFetcher:
             return normalize_comment_component_payloads(payloads)
         finally:
             await page.close()
+
+    async def get_video_comments(self, video_link: str) -> List[Dict]:
+        # backward compatible wrapper
+        return await self.get_page_comments(video_link)
 
     async def get_login_hint(self) -> Optional[Dict]:
         cookies = build_playwright_cookies(self.cookie_string)

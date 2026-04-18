@@ -18,7 +18,7 @@ def _parse_time_env(name: str, default: str) -> dt_time:
 # ============================================
 
 # B站UP主配置（请在 .env 文件中设置 UP_UID）
-UP_UID = int(os.getenv("UP_UID", "0"))
+UP_UID = int(os.getenv("UP_UID", "1671203508"))
 
 # 飞书机器人配置（请在 .env 文件中设置 FEISHU_WEBHOOK）
 FEISHU_WEBHOOK = os.getenv("FEISHU_WEBHOOK", "")

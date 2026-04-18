@@ -1,20 +1,23 @@
 import asyncio
 import random
-from typing import List, Dict, Optional
-from bilibili_api import user, comment, Credential
+from typing import Dict, List, Optional
+
+import requests
+from bilibili_api import Credential, comment, user
 from bilibili_api.comment import CommentResourceType
+
 from browser_fetcher import BrowserBilibiliFetcher
 from config import (
-    BILI_COOKIE,
-    BILI_SESSDATA,
     BILI_BILI_JCT,
-    BILI_BUVID3,
-    BILI_BUVID4,
-    BILI_DEDEUSERID,
-    BILI_FETCH_MODE,
     BILI_BROWSER_EXECUTABLE,
     BILI_BROWSER_HEADLESS,
     BILI_BROWSER_TIMEOUT_MS,
+    BILI_BUVID3,
+    BILI_BUVID4,
+    BILI_COOKIE,
+    BILI_DEDEUSERID,
+    BILI_FETCH_MODE,
+    BILI_SESSDATA,
     COMMENT_MAX_PAGES_AUTH,
     COMMENT_MAX_PAGES_GUEST,
 )
@@ -30,7 +33,7 @@ class SecurityControlError(Exception):
 
 class BilibiliAPI:
     """B站API封装 - 使用 bilibili-api-python 库"""
-    
+
     def __init__(
         self,
         cookie_string: str = BILI_COOKIE,
@@ -78,9 +81,10 @@ class BilibiliAPI:
             print("🔐 已启用 B站登录态，请求将携带 Cookie")
         else:
             print("⚠️ 当前未配置 B站登录态，将仅抓取 1 页最新评论，稳定性和准确率会受限")
-    
+
     def _get_random_ua(self) -> str:
         """获取随机User-Agent"""
+
         return random.choice(self.user_agents)
 
     def _parse_cookie_string(self, cookie_string: str) -> Dict[str, str]:
@@ -134,6 +138,7 @@ class BilibiliAPI:
 
     async def validate_login(self) -> Optional[Dict]:
         """验证当前登录态是否可用"""
+
         if self.prefers_browser_fetch():
             return await self.browser_fetcher.get_login_hint()
 
@@ -146,85 +151,80 @@ class BilibiliAPI:
                 "mid": info.get("mid"),
                 "uname": info.get("name") or info.get("uname"),
             }
-        except Exception as e:
-            if self._is_auth_error(e):
-                print(f"⚠️ B站登录态校验失败: {e}")
+        except Exception as exc:
+            if self._is_auth_error(exc):
+                print(f"⚠️ B站登录态校验失败: {exc}")
                 return None
             raise
 
     async def get_user_profile(self, uid: int) -> Optional[Dict]:
         """获取指定 UID 的用户信息，用于通知文案等非关键路径。"""
+
         try:
             info = await user.User(uid, credential=self.credential).get_user_info()
-        except Exception as e:
-            print(f"⚠️ 获取UP主信息失败: {e}")
+        except Exception as exc:
+            print(f"⚠️ 获取UP主信息失败: {exc}")
             return None
 
         return {
             "mid": info.get("mid", uid),
             "uname": info.get("name") or info.get("uname"),
         }
-    
+
     async def _retry_with_backoff(self, func, max_retries: int = 3, base_delay: float = 1.0):
-        """
-        带指数退避的重试机制
-        
-        Args:
-            func: 要执行的异步函数
-            max_retries: 最大重试次数
-            base_delay: 基础延迟时间（秒）
-        
-        Returns:
-            函数执行结果
-        
-        Raises:
-            最后一次异常
-        """
+        """带指数退避的重试机制"""
+
         last_exception = None
-        
+
         for attempt in range(max_retries):
             try:
                 return await func()
-            except Exception as e:
-                last_exception = e
-                if self._is_security_block(e):
+            except Exception as exc:
+                last_exception = exc
+                if self._is_security_block(exc):
                     raise SecurityControlError(
-                        f"B站触发 412 风控: {e}",
+                        f"B站触发 412 风控: {exc}",
                         cooldown_seconds=120,
-                    ) from e
-                error_msg = str(e).lower()
-                
-                # 判断是否是需要重试的错误
+                    ) from exc
+
+                error_msg = str(exc).lower()
+
                 retryable_errors = [
-                    'timeout', 'connection', 'ssl', 'reset', 'refused',
-                    'too many requests', '429', '503', '502', '500',
-                    'verify', 'certificate', 'handshake'
+                    "timeout",
+                    "connection",
+                    "ssl",
+                    "reset",
+                    "refused",
+                    "too many requests",
+                    "429",
+                    "503",
+                    "502",
+                    "500",
+                    "verify",
+                    "certificate",
+                    "handshake",
                 ]
-                
+
                 is_retryable = any(err in error_msg for err in retryable_errors)
-                
+
                 if not is_retryable and attempt < max_retries - 1:
-                    # 检查是否是HTML响应（包含<html或<script）
-                    is_retryable = '<html' in str(e) or '<script' in str(e)
-                
+                    is_retryable = "<html" in str(exc) or "<script" in str(exc)
+
                 if not is_retryable:
-                    # 非可重试错误，直接抛出
                     raise
-                
+
                 if attempt < max_retries - 1:
-                    # 计算指数退避延迟（1s, 2s, 4s...）加上随机抖动
-                    delay = base_delay * (2 ** attempt) + random.uniform(0, 0.5)
-                    print(f"  ⚠️  请求失败，{delay:.1f}秒后重试({attempt + 1}/{max_retries}): {e}")
+                    delay = base_delay * (2**attempt) + random.uniform(0, 0.5)
+                    print(f"  ⚠️  请求失败，{delay:.1f}秒后重试({attempt + 1}/{max_retries}): {exc}")
                     await asyncio.sleep(delay)
                 else:
-                    print(f"  ❌ 重试{max_retries}次后仍然失败: {e}")
-        
+                    print(f"  ❌ 重试{max_retries}次后仍然失败: {exc}")
+
         raise last_exception
-    
+
     async def get_latest_video(self, uid: int) -> Optional[Dict]:
-        """
-        获取UP主最新发布的视频（带重试机制）
-        """
+        """获取UP主最新发布的视频（带重试机制）"""
+
         if self.prefers_browser_fetch():
             try:
                 video = await self.browser_fetcher.get_latest_video(uid)
@@ -232,43 +232,71 @@ class BilibiliAPI:
                     return video
                 if self.fetch_mode == "browser":
                     return None
-            except Exception as e:
-                print(f"浏览器抓取最新视频失败: {e}")
+            except Exception as exc:
+                print(f"浏览器抓取最新视频失败: {exc}")
                 if self.fetch_mode == "browser":
                     return None
 
         async def _fetch():
-            # 添加随机延迟，避免请求过于规律
             await asyncio.sleep(random.uniform(0.1, 0.3))
-            
+
             u = user.User(uid, credential=self.credential)
-            # 获取视频列表，只取最新1个
             videos = await u.get_videos(ps=1)
-            
-            if videos and videos.get('list', {}).get('vlist'):
-                video_data = videos['list']['vlist'][0]
+
+            if videos and videos.get("list", {}).get("vlist"):
+                video_data = videos["list"]["vlist"][0]
                 return {
-                    'bvid': video_data['bvid'],
-                    'aid': video_data['aid'],
-                    'title': video_data['title'],
-                    'description': video_data.get('description', ''),
-                    'created': video_data['created'],
-                    'link': f"https://www.bilibili.com/video/{video_data['bvid']}",
+                    "bvid": video_data["bvid"],
+                    "aid": video_data["aid"],
+                    "title": video_data["title"],
+                    "description": video_data.get("description", ""),
+                    "created": video_data["created"],
+                    "link": f"https://www.bilibili.com/video/{video_data['bvid']}",
                 }
             return None
-        
+
         try:
             return await self._retry_with_backoff(_fetch, max_retries=3, base_delay=1.0)
         except SecurityControlError:
             raise
-        except Exception as e:
-            print(f"获取最新视频失败: {e}")
+        except Exception as exc:
+            print(f"获取最新视频失败: {exc}")
             return None
-    
+
+    async def get_latest_post(self, uid: int) -> Optional[Dict]:
+        """获取 UP 主最新发布内容（视频/动态/充电相关动态）。
+
+        优先从空间动态页抓取（更容易覆盖充电/专属内容），失败则回退到公开视频列表。
+        """
+
+        if self.prefers_browser_fetch():
+            try:
+                post = await self.browser_fetcher.get_latest_post(uid)
+                if post:
+                    return post
+            except Exception as exc:
+                print(f"浏览器抓取空间动态失败: {exc}")
+
+        video = await self.get_latest_video(uid)
+        if not video:
+            return None
+
+        return {
+            "kind": "video",
+            "post_key": f"video:{video['bvid']}",
+            "title": video["title"],
+            "created": int(video.get("created") or 0),
+            "link": video["link"],
+            "dynamic_id": None,
+            "comment_type": 1,
+            "comment_oid": int(video["aid"]),
+            "bvid": video["bvid"],
+            "aid": int(video["aid"]),
+        }
+
     async def get_video_comments(self, aid: int) -> List[Dict]:
-        """
-        获取视频的评论列表（使用get_comments_lazy新接口，带重试机制）
-        """
+        """获取视频的评论列表（使用get_comments_lazy新接口，带重试机制）"""
+
         if self.prefers_browser_fetch():
             try:
                 comments = await self.browser_fetcher.get_video_comments(
@@ -278,99 +306,208 @@ class BilibiliAPI:
                     return comments
                 if self.fetch_mode == "browser":
                     return comments
-            except Exception as e:
-                print(f"浏览器抓取评论失败: {e}")
+            except Exception as exc:
+                print(f"浏览器抓取评论失败: {exc}")
                 if self.fetch_mode == "browser":
                     return []
 
-        comments = []
+        comments_acc: List[Dict] = []
         seen_rpids = set()
         page = 1
         max_pages = self._get_comment_page_limit()
         pag = ""  # pagination offset
-        
+
         async def _fetch_page(page_offset: str):
-            """获取单页评论"""
             return await comment.get_comments_lazy(
                 oid=aid,
                 type_=CommentResourceType.VIDEO,
                 offset=page_offset,
-                credential=self.credential
+                credential=self.credential,
             )
-        
+
         try:
             while page <= max_pages:
-                # 使用重试机制获取评论
                 c = await self._retry_with_backoff(
                     lambda: _fetch_page(pag),
                     max_retries=3,
-                    base_delay=0.5
+                    base_delay=0.5,
                 )
-                
-                # 获取下一页的offset
-                if 'cursor' in c and 'pagination_reply' in c['cursor']:
-                    pag = c['cursor']['pagination_reply'].get('next_offset', '')
+
+                if "cursor" in c and "pagination_reply" in c["cursor"]:
+                    pag = c["cursor"]["pagination_reply"].get("next_offset", "")
                 else:
                     pag = ""
-                
-                replies = c.get('replies')
+
+                replies = c.get("replies")
                 if not replies:
                     break
-                
+
                 for reply in replies:
                     comment_data = {
-                        'rpid': reply['rpid'],
-                        'mid': reply['member']['mid'],
-                        'uname': reply['member']['uname'],
-                        'content': reply['content']['message'],
-                        'ctime': reply['ctime'],
-                        'like': reply['count'],
-                        'parent': reply.get('parent', 0),
+                        "rpid": reply["rpid"],
+                        "mid": reply["member"]["mid"],
+                        "uname": reply["member"]["uname"],
+                        "content": reply["content"]["message"],
+                        "ctime": reply["ctime"],
+                        "like": reply["count"],
+                        "parent": reply.get("parent", 0),
                     }
-                    if comment_data['rpid'] not in seen_rpids:
-                        comments.append(comment_data)
-                        seen_rpids.add(comment_data['rpid'])
-                    
-                    # 获取楼中楼回复
-                    if reply.get('replies'):
-                        for sub_reply in reply['replies']:
+                    if comment_data["rpid"] not in seen_rpids:
+                        comments_acc.append(comment_data)
+                        seen_rpids.add(comment_data["rpid"])
+
+                    if reply.get("replies"):
+                        for sub_reply in reply["replies"]:
                             sub_comment = {
-                                'rpid': sub_reply['rpid'],
-                                'mid': sub_reply['member']['mid'],
-                                'uname': sub_reply['member']['uname'],
-                                'content': sub_reply['content']['message'],
-                                'ctime': sub_reply['ctime'],
-                                'like': sub_reply['count'],
-                                'parent': reply['rpid'],
+                                "rpid": sub_reply["rpid"],
+                                "mid": sub_reply["member"]["mid"],
+                                "uname": sub_reply["member"]["uname"],
+                                "content": sub_reply["content"]["message"],
+                                "ctime": sub_reply["ctime"],
+                                "like": sub_reply["count"],
+                                "parent": reply["rpid"],
                             }
-                            if sub_comment['rpid'] not in seen_rpids:
-                                comments.append(sub_comment)
-                                seen_rpids.add(sub_comment['rpid'])
-                
+                            if sub_comment["rpid"] not in seen_rpids:
+                                comments_acc.append(sub_comment)
+                                seen_rpids.add(sub_comment["rpid"])
+
                 page += 1
-                if not pag:  # 没有更多页面了
+                if not pag:
                     break
-                
-                # 页间延迟，避免请求过快
+
                 await asyncio.sleep(random.uniform(0.3, 0.6))
-                
-        except Exception as e:
-            if isinstance(e, SecurityControlError):
+
+        except Exception as exc:
+            if isinstance(exc, SecurityControlError):
                 raise
-            print(f"获取评论失败: {e}")
-        
-        return comments
-    
+            print(f"获取评论失败: {exc}")
+
+        return comments_acc
+
+    async def _get_reply_comments_via_http(self, oid: int, type_code: int) -> List[Dict]:
+        """通过 /x/v2/reply 获取评论（适用于动态/相簿/专栏等）。"""
+
+        comments_acc: List[Dict] = []
+        seen_rpids = set()
+        page = 1
+        max_pages = self._get_comment_page_limit()
+
+        def _do_request(pn: int) -> Dict:
+            headers = {
+                "User-Agent": self._get_random_ua(),
+                "Referer": "https://www.bilibili.com",
+            }
+            if self.cookie_string:
+                headers["Cookie"] = self.cookie_string
+
+            response = requests.get(
+                "https://api.bilibili.com/x/v2/reply",
+                params={
+                    "type": type_code,
+                    "oid": oid,
+                    "sort": 0,
+                    "nohot": 1,
+                    "ps": 20,
+                    "pn": pn,
+                },
+                headers=headers,
+                timeout=10,
+            )
+            if response.status_code == 412:
+                raise Exception("412 - The request was rejected because of the bilibili security control policy")
+            response.raise_for_status()
+            return response.json()
+
+        try:
+            while page <= max_pages:
+                payload = await self._retry_with_backoff(
+                    lambda: asyncio.to_thread(_do_request, page),
+                    max_retries=3,
+                    base_delay=0.5,
+                )
+
+                if payload.get("code") != 0:
+                    code = payload.get("code")
+                    if code in {12002, 12009, -404}:
+                        break
+                    raise Exception(f"reply api failed: code={code} message={payload.get('message')}")
+
+                data = payload.get("data") or {}
+                replies = data.get("replies") or []
+                if not replies:
+                    break
+
+                for reply in replies:
+                    comment_data = {
+                        "rpid": reply["rpid"],
+                        "mid": reply.get("member", {}).get("mid"),
+                        "uname": reply.get("member", {}).get("uname", ""),
+                        "content": reply.get("content", {}).get("message", ""),
+                        "ctime": reply.get("ctime", 0),
+                        "like": reply.get("like", reply.get("count", 0)),
+                        "parent": reply.get("parent", 0) or 0,
+                    }
+                    if comment_data["rpid"] not in seen_rpids:
+                        comments_acc.append(comment_data)
+                        seen_rpids.add(comment_data["rpid"])
+
+                    for sub_reply in reply.get("replies") or []:
+                        sub_comment = {
+                            "rpid": sub_reply["rpid"],
+                            "mid": sub_reply.get("member", {}).get("mid"),
+                            "uname": sub_reply.get("member", {}).get("uname", ""),
+                            "content": sub_reply.get("content", {}).get("message", ""),
+                            "ctime": sub_reply.get("ctime", 0),
+                            "like": sub_reply.get("like", sub_reply.get("count", 0)),
+                            "parent": reply["rpid"],
+                        }
+                        if sub_comment["rpid"] not in seen_rpids:
+                            comments_acc.append(sub_comment)
+                            seen_rpids.add(sub_comment["rpid"])
+
+                page += 1
+                await asyncio.sleep(random.uniform(0.3, 0.6))
+
+        except SecurityControlError:
+            raise
+        except Exception as exc:
+            print(f"获取评论失败: {exc}")
+
+        return comments_acc
+
+    async def get_post_comments(self, post: Dict) -> List[Dict]:
+        """获取某条内容（视频/动态）下的评论。"""
+
+        if post.get("kind") == "video" and post.get("aid") is not None:
+            return await self.get_video_comments(int(post["aid"]))
+
+        comment_type = int(post.get("comment_type") or 0)
+        comment_oid = post.get("comment_oid")
+        if not comment_type or comment_oid is None:
+            return []
+
+        # 动态/相簿/专栏等，优先尝试页面抓取（成功率高），失败回退 /x/v2/reply
+        if self.prefers_browser_fetch() and post.get("link"):
+            try:
+                comments = await self.browser_fetcher.get_page_comments(post["link"])
+                if comments or self.fetch_mode == "browser":
+                    return comments
+            except Exception as exc:
+                print(f"浏览器抓取评论失败: {exc}")
+                if self.fetch_mode == "browser":
+                    return []
+
+        return await self._get_reply_comments_via_http(int(comment_oid), comment_type)
+
     def filter_up_comments(self, comments: List[Dict], up_uid: int) -> List[Dict]:
-        """
-        筛选出UP主的评论
-        """
+        """筛选出UP主的评论"""
+
         up_comments = []
         up_uid_str = str(up_uid)
-        for comment in comments:
-            if str(comment['mid']) == up_uid_str:
-                up_comments.append(comment)
-        return sorted(up_comments, key=lambda item: item['ctime'], reverse=True)
+        for comment_item in comments:
+            if str(comment_item.get("mid")) == up_uid_str:
+                up_comments.append(comment_item)
+        return sorted(up_comments, key=lambda item: item.get("ctime", 0), reverse=True)
 
     async def close(self):
         if self.browser_fetcher:

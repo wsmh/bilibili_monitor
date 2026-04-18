@@ -2,17 +2,15 @@
 import asyncio
 import time
 from datetime import datetime, time as dt_time
+
 from bili_api import BilibiliAPI, SecurityControlError
-from feishu_bot import FeishuBot
-from storage import CommentStorage
 from config import (
     AFTERNOON_END,
     AFTERNOON_INTERVAL_SECONDS,
     AFTERNOON_START,
-    UP_UID,
-    FEISHU_WEBHOOK,
     DATA_FILE,
     DEFAULT_INTERVAL_SECONDS,
+    FEISHU_WEBHOOK,
     MORNING_END,
     MORNING_INTERVAL_SECONDS,
     MORNING_START,
@@ -20,7 +18,10 @@ from config import (
     PEAK_INTERVAL_SECONDS,
     PEAK_START,
     SECURITY_COOLDOWN_SECONDS,
+    UP_UID,
 )
+from feishu_bot import FeishuBot
+from storage import CommentStorage
 
 
 def get_check_interval_for_datetime(current: datetime) -> int:
@@ -65,9 +66,17 @@ def format_monitored_up_label(uid: int, profile) -> str:
     return str(uid)
 
 
+def get_post_kind_label(kind: str) -> str:
+    return "视频" if kind == "video" else "动态"
+
+
+def get_post_kind_emoji(kind: str) -> str:
+    return "🎬" if kind == "video" else "📝"
+
+
 class BilibiliMonitor:
     """B站UP主评论监控器"""
-    
+
     def __init__(self):
         self.bilibili = BilibiliAPI()
         self.feishu = FeishuBot(FEISHU_WEBHOOK)
@@ -76,7 +85,7 @@ class BilibiliMonitor:
         self.cooldown_until = 0.0
         self.last_block_alert_at = 0.0
         self.login_status_checked = False
-        
+
         print("=" * 60)
         print("🎬 B站UP主评论监控器")
         print("=" * 60)
@@ -87,130 +96,136 @@ class BilibiliMonitor:
         print(f"🔐 B站登录态: {'已配置' if self.bilibili.has_auth() else '未配置'}")
         print(f"🌐 抓取模式: {self.bilibili.fetch_mode}")
         print("=" * 60)
-    
+
     async def run(self):
         """运行监控循环"""
+
         print("\n🚀 启动监控...\n")
         await self._check_login_status()
         monitored_up_label = format_monitored_up_label(
             UP_UID,
             await self.bilibili.get_user_profile(UP_UID),
         )
-        
-        # 发送启动通知
+
         self.feishu.send_text(
-            f"🚀 B站评论监控已启动\n"
+            "🚀 B站评论监控已启动\n"
             f"👤 监控UP主: {monitored_up_label}\n"
             f"⏰ 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
-        
+
         check_count = 0
-        
+
         try:
             while self.running:
                 now = time.time()
                 if now < self.cooldown_until:
                     wait_seconds = max(1, int(self.cooldown_until - now))
                     print(f"\n🛡️ 风控冷却中，还需等待 {wait_seconds} 秒")
-                    await asyncio.sleep(min(wait_seconds, get_check_interval_for_datetime(datetime.now())))
+                    await asyncio.sleep(
+                        min(wait_seconds, get_check_interval_for_datetime(datetime.now()))
+                    )
                     continue
 
                 check_count += 1
-                print(f"\n🔍 第 {check_count} 次检查 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                
+                print(
+                    f"\n🔍 第 {check_count} 次检查 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+
                 await self._check_once()
-                
-                # 等待下次检查
+
                 next_interval = get_check_interval_for_datetime(datetime.now())
                 print(f"⏳ 当前时段下次检查间隔: {next_interval} 秒")
                 await asyncio.sleep(next_interval)
-                
+
         except KeyboardInterrupt:
             print("\n\n👋 监控已停止")
             self.feishu.send_text(
-                f"👋 B站评论监控已停止\n"
+                "👋 B站评论监控已停止\n"
                 f"📊 共检查 {check_count} 次\n"
                 f"⏰ 停止时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
         finally:
             await self.bilibili.close()
-    
+
     async def _check_once(self):
         """执行一次检查"""
+
         try:
-            # 1. 获取最新视频
-            video = await self.bilibili.get_latest_video(UP_UID)
-            if not video:
-                print("❌ 无法获取最新视频")
+            post = await self.bilibili.get_latest_post(UP_UID)
+            if not post:
+                print("❌ 无法获取最新内容")
                 return
-            
-            print(f"🎬 最新视频: {video['title'][:50]}...")
-            print(f"🔗 链接: {video['link']}")
-            
-            # 2. 检查是否为新视频
-            if self.storage.is_new_video(video['bvid']):
-                self.storage.switch_video(video['bvid'])
-                # 新视频发送通知
+
+            kind = post.get("kind") or "video"
+            kind_label = get_post_kind_label(kind)
+            kind_emoji = get_post_kind_emoji(kind)
+
+            title = post.get("title") or ""
+            link = post.get("link") or ""
+
+            print(f"{kind_emoji} 最新{kind_label}: {title[:50]}...")
+            print(f"🔗 链接: {link}")
+
+            post_key = post.get("post_key")
+            if post_key and self.storage.is_new_post(post_key):
+                self.storage.switch_post(post_key)
                 self.feishu.send_text(
-                    f"🎬 检测到UP主发布新视频！\n"
-                    f"📺 {video['title']}\n"
-                    f"🔗 {video['link']}"
+                    f"{kind_emoji} 检测到UP主发布新{kind_label}！\n" f"📌 {title}\n" f"🔗 {link}"
                 )
-            
-            # 3. 获取视频评论
-            comments = await self.bilibili.get_video_comments(video['aid'])
+
+            comments = await self.bilibili.get_post_comments(post)
             if not comments:
                 print("📭 暂无评论")
                 return
-            
+
             print(f"💬 本轮获取到 {len(comments)} 条最新评论/回复")
-            
-            # 4. 筛选UP主的评论
+
             up_comments = self.bilibili.filter_up_comments(comments, UP_UID)
             if not up_comments:
                 print("📝 UP主暂未发表评论")
                 return
-            
+
             print(f"📝 找到 {len(up_comments)} 条UP主评论")
-            
-            # 5. 筛选出新评论（未通知过的）
-            new_comments = [c for c in up_comments if not self.storage.is_notified(c['rpid'])]
-            
+
+            new_comments = [
+                comment for comment in up_comments if not self.storage.is_notified(comment["rpid"])
+            ]
+
             if not new_comments:
                 print("✅ 没有新评论需要通知")
                 return
-            
+
             print(f"🆕 发现 {len(new_comments)} 条新评论")
-            
-            # 6. 发送通知
-            video_info = {
-                'bvid': video['bvid'],
-                'title': video['title'],
-                'link': video['link'],
+
+            post_info = {
+                "kind": kind,
+                "title": title,
+                "link": link,
             }
-            
+
             if len(new_comments) == 1:
-                success = self.feishu.send_up_comment(video_info, new_comments[0])
+                success = self.feishu.send_up_comment(post_info, new_comments[0])
                 if success:
-                    self.storage.mark_notified(new_comments[0]['rpid'])
+                    self.storage.mark_notified(new_comments[0]["rpid"])
             else:
-                success = self.feishu.send_multiple_comments(video_info, new_comments)
+                success = self.feishu.send_multiple_comments(post_info, new_comments)
                 if success:
-                    rpids = [c['rpid'] for c in new_comments]
+                    rpids = [comment["rpid"] for comment in new_comments]
                     self.storage.mark_multiple_notified(rpids)
-        except SecurityControlError as e:
+
+        except SecurityControlError as exc:
             self.cooldown_until = time.time() + SECURITY_COOLDOWN_SECONDS
-            print(f"🛡️ 触发 B站风控，进入 {SECURITY_COOLDOWN_SECONDS} 秒冷却: {e}")
+            print(f"🛡️ 触发 B站风控，进入 {SECURITY_COOLDOWN_SECONDS} 秒冷却: {exc}")
             if time.time() - self.last_block_alert_at > SECURITY_COOLDOWN_SECONDS:
                 self.feishu.send_text(
-                    f"⚠️ B站评论监控触发风控\n"
+                    "⚠️ B站评论监控触发风控\n"
                     f"👤 UP主: {UP_UID}\n"
                     f"⏸️ 冷却时间: {SECURITY_COOLDOWN_SECONDS} 秒\n"
                     f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                 )
                 self.last_block_alert_at = time.time()
-        except Exception as e:
-            print(f"❌ 检查过程出错: {e}")
+        except Exception as exc:
+            print(f"❌ 检查过程出错: {exc}")
 
     async def _check_login_status(self):
         if self.login_status_checked:
@@ -224,16 +239,16 @@ class BilibiliMonitor:
 
         if self.bilibili.has_auth():
             warning = (
-                "⚠️ 已检测到 B站 Cookie，但登录态校验失败。\n"
-                "可能是 Cookie 已过期，评论抓取准确率会下降。"
+                "⚠️ 已检测到 B站 Cookie，但登录态校验失败。\n" "可能是 Cookie 已过期，评论抓取准确率会下降。"
             )
             print(warning)
             self.feishu.send_text(warning)
         else:
             print("⚠️ 未配置 B站 Cookie，将以匿名模式运行")
-    
+
     def stop(self):
         """停止监控"""
+
         self.running = False
 
 
