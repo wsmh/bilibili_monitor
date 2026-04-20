@@ -392,6 +392,19 @@ class BilibiliAPI:
                     f"https://www.bilibili.com/video/av{aid}"
                 )
                 if comments:
+                    # Browser extraction may miss pinned/hot sections; supplement via reply API (first page extras).
+                    try:
+                        extras = await self._get_reply_extras_via_http(aid, 1)
+                        if extras:
+                            merged = {item.get("rpid"): item for item in comments if item.get("rpid") is not None}
+                            for item in extras:
+                                rpid = item.get("rpid")
+                                if rpid is None:
+                                    continue
+                                merged.setdefault(rpid, item)
+                            return list(merged.values())
+                    except Exception as exc:
+                        print(f"补齐置顶/热评失败: {exc}")
                     return comments
                 if self.fetch_mode == "browser":
                     return comments
@@ -427,7 +440,44 @@ class BilibiliAPI:
                 else:
                     pag = ""
 
-                replies = c.get("replies")
+                def _iter_extra_replies(container):
+                    """Yield reply dicts from non-standard sections like top/upper/hots.
+
+                    Different bilibili endpoints (and wrappers) may place pinned/hot replies
+                    outside of the main `replies` list. We try a few common shapes defensively.
+                    """
+
+                    if not container:
+                        return
+                    if isinstance(container, list):
+                        for item in container:
+                            if isinstance(item, dict):
+                                yield item
+                        return
+                    if isinstance(container, dict):
+                        # Common pattern: {"upper": {...}, "admin": {...}, ...}
+                        for key in ("upper", "admin", "vote", "top", "hot"):
+                            item = container.get(key)
+                            if isinstance(item, dict):
+                                yield item
+                            elif isinstance(item, list):
+                                for entry in item:
+                                    if isinstance(entry, dict):
+                                        yield entry
+                        # Some wrappers put the actual list under "replies"
+                        maybe_replies = container.get("replies")
+                        if isinstance(maybe_replies, list):
+                            for item in maybe_replies:
+                                if isinstance(item, dict):
+                                    yield item
+
+                replies = []
+                for key in ("top", "top_replies", "hots", "upper", "hot"):
+                    for item in _iter_extra_replies(c.get(key)):
+                        replies.append(item)
+                main_replies = c.get("replies")
+                if isinstance(main_replies, list):
+                    replies.extend(main_replies)
                 if not replies:
                     break
 
@@ -485,6 +535,37 @@ class BilibiliAPI:
         page = 1
         max_pages = self._get_comment_page_limit()
 
+        def _iter_extra_replies_from_reply_api(data: Dict):
+            """Yield reply dicts from pinned/hot sections of /x/v2/reply payload."""
+
+            if not isinstance(data, dict):
+                return
+
+            # Pinned section is typically a dict containing sub-keys like "upper"/"admin".
+            top = data.get("top")
+            if isinstance(top, dict):
+                for key in ("upper", "admin", "vote"):
+                    item = top.get(key)
+                    if isinstance(item, dict):
+                        yield item
+                    elif isinstance(item, list):
+                        for entry in item:
+                            if isinstance(entry, dict):
+                                yield entry
+                # Some variants place pinned replies under "replies"
+                maybe_replies = top.get("replies")
+                if isinstance(maybe_replies, list):
+                    for item in maybe_replies:
+                        if isinstance(item, dict):
+                            yield item
+
+            # Hot replies may appear as a list under "hots" (when nohot=0).
+            hots = data.get("hots")
+            if isinstance(hots, list):
+                for item in hots:
+                    if isinstance(item, dict):
+                        yield item
+
         def _do_request(pn: int) -> Dict:
             headers = {
                 "User-Agent": self._get_random_ua(),
@@ -499,7 +580,8 @@ class BilibiliAPI:
                     "type": type_code,
                     "oid": oid,
                     "sort": 0,
-                    "nohot": 1,
+                    # Include hot replies; we'll still filter by UP UID later.
+                    "nohot": 0,
                     "ps": 20,
                     "pn": pn,
                 },
@@ -526,8 +608,14 @@ class BilibiliAPI:
                     raise Exception(f"reply api failed: code={code} message={payload.get('message')}")
 
                 data = payload.get("data") or {}
-                replies = data.get("replies") or []
+                replies = []
+                for item in _iter_extra_replies_from_reply_api(data):
+                    replies.append(item)
+                main_replies = data.get("replies") or []
+                if isinstance(main_replies, list):
+                    replies.extend(main_replies)
                 if not replies:
+                    # Even if there are pinned/hot items, we would have appended them above.
                     break
 
                 for reply in replies:
@@ -571,6 +659,111 @@ class BilibiliAPI:
             print(f"获取评论失败: {exc}")
 
         return comments_acc
+
+    async def _get_reply_extras_via_http(self, oid: int, type_code: int) -> List[Dict]:
+        """Fetch pinned/hot replies from /x/v2/reply first page for supplementing browser results."""
+
+        def _iter_extra_replies_from_reply_api(data: Dict):
+            if not isinstance(data, dict):
+                return
+
+            top = data.get("top")
+            if isinstance(top, dict):
+                for key in ("upper", "admin", "vote"):
+                    item = top.get(key)
+                    if isinstance(item, dict):
+                        yield item
+                    elif isinstance(item, list):
+                        for entry in item:
+                            if isinstance(entry, dict):
+                                yield entry
+                maybe_replies = top.get("replies")
+                if isinstance(maybe_replies, list):
+                    for item in maybe_replies:
+                        if isinstance(item, dict):
+                            yield item
+
+            hots = data.get("hots")
+            if isinstance(hots, list):
+                for item in hots:
+                    if isinstance(item, dict):
+                        yield item
+
+        def _do_request() -> Dict:
+            headers = {
+                "User-Agent": self._get_random_ua(),
+                "Referer": "https://www.bilibili.com",
+            }
+            if self.cookie_string:
+                headers["Cookie"] = self.cookie_string
+
+            response = requests.get(
+                "https://api.bilibili.com/x/v2/reply",
+                params={
+                    "type": type_code,
+                    "oid": oid,
+                    "sort": 0,
+                    "nohot": 0,
+                    "ps": 20,
+                    "pn": 1,
+                },
+                headers=headers,
+                timeout=10,
+            )
+            if response.status_code == 412:
+                raise Exception("412 - The request was rejected because of the bilibili security control policy")
+            response.raise_for_status()
+            return response.json()
+
+        payload = await self._retry_with_backoff(
+            lambda: asyncio.to_thread(_do_request),
+            max_retries=3,
+            base_delay=0.5,
+        )
+        if payload.get("code") != 0:
+            return []
+
+        data = payload.get("data") or {}
+
+        def _normalize(item: Dict) -> Dict:
+            member = item.get("member", {})
+            content = item.get("content", {})
+            return {
+                "rpid": item.get("rpid"),
+                "mid": member.get("mid"),
+                "uname": member.get("uname", ""),
+                "content": content.get("message", ""),
+                "ctime": item.get("ctime", 0),
+                "like": item.get("like", item.get("count", 0)),
+                "parent": item.get("parent", 0) or 0,
+                "root": item.get("root", 0) or 0,
+                "dialog": item.get("dialog", 0) or 0,
+            }
+
+        extras: List[Dict] = []
+        seen = set()
+        for reply in _iter_extra_replies_from_reply_api(data):
+            if not isinstance(reply, dict) or not reply.get("rpid"):
+                continue
+            normalized = _normalize(reply)
+            rpid = normalized.get("rpid")
+            if rpid is None or rpid in seen:
+                continue
+            extras.append(normalized)
+            seen.add(rpid)
+
+            # Include the inlined nested replies (may be incomplete but still useful).
+            for sub_reply in reply.get("replies") or []:
+                if not isinstance(sub_reply, dict) or not sub_reply.get("rpid"):
+                    continue
+                normalized_sub = _normalize(sub_reply)
+                sub_rpid = normalized_sub.get("rpid")
+                if sub_rpid is None or sub_rpid in seen:
+                    continue
+                extras.append(normalized_sub)
+                seen.add(sub_rpid)
+
+        return extras
 
     async def _get_reply_thread_map_via_http(
         self,
@@ -799,7 +992,23 @@ class BilibiliAPI:
         if self.prefers_browser_fetch() and post.get("link"):
             try:
                 comments = await self.browser_fetcher.get_page_comments(post["link"])
-                if comments or self.fetch_mode == "browser":
+                if comments:
+                    # Same as video: browser may miss pinned/hot sections.
+                    try:
+                        extras = await self._get_reply_extras_via_http(int(comment_oid), comment_type)
+                        if extras:
+                            merged = {item.get("rpid"): item for item in comments if item.get("rpid") is not None}
+                            for item in extras:
+                                rpid = item.get("rpid")
+                                if rpid is None:
+                                    continue
+                                merged.setdefault(rpid, item)
+                            return list(merged.values())
+                    except Exception as exc:
+                        print(f"补齐置顶/热评失败: {exc}")
+                    return comments
+
+                if self.fetch_mode == "browser":
                     return comments
             except Exception as exc:
                 print(f"浏览器抓取评论失败: {exc}")

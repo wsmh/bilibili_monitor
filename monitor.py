@@ -185,9 +185,34 @@ class BilibiliMonitor:
 
             tracked_up_comments = []
             if TRACKED_THREAD_SCAN_ENABLED:
+                # Proactively scan a small set of the most recent root threads from the current window,
+                # so we can catch UP replies that are not included in the first few nested replies.
+                candidate_roots = []
+                for item in comments:
+                    if not isinstance(item, dict):
+                        continue
+                    parent = int(item.get("parent") or 0)
+                    ctime = int(item.get("ctime") or 0)
+
+                    if parent == 0:
+                        rpid = item.get("rpid")
+                        if rpid is None:
+                            continue
+                        root_rpid = int(rpid)
+                    else:
+                        # For replies, prefer explicit root; fall back to parent.
+                        root_rpid = int(item.get("root") or parent)
+
+                    if root_rpid:
+                        candidate_roots.append((ctime, root_rpid))
+
+                candidate_roots.sort(reverse=True)
+                recent_roots = [root for _, root in candidate_roots[:TRACKED_THREAD_MAX_ROOTS]]
+
+                roots_to_scan = list(dict.fromkeys(self.storage.get_tracked_roots() + recent_roots))
                 tracked_up_comments = await self.bilibili.get_up_replies_from_tracked_threads(
                     post,
-                    self.storage.get_tracked_roots(),
+                    roots_to_scan,
                     UP_UID,
                     TRACKED_THREAD_MAX_PAGES,
                 )
