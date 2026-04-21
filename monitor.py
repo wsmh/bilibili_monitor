@@ -170,8 +170,18 @@ class BilibiliMonitor:
             print(f"🔗 链接: {link}")
 
             post_key = post.get("post_key")
+            post_created = int(post.get("created") or 0)
             if post_key and self.storage.is_new_post(post_key):
-                self.storage.switch_post(post_key)
+                stored_created = self.storage.get_current_post_created()
+                # Prevent flapping between different "latest" sources: never switch to an older post.
+                if stored_created is not None and post_created and post_created < stored_created:
+                    print(
+                        "⚠️ 检测到较旧的最新内容结果，忽略以避免来回切换："
+                        f"candidate={post_key}({post_created}) < current={self.storage.current_post_key}({stored_created})"
+                    )
+                    return
+
+                self.storage.switch_post(post_key, created=post_created or None)
                 self.feishu.send_text(
                     f"{kind_emoji} 检测到UP主发布新{kind_label}！\n" f"📌 {title}\n" f"🔗 {link}"
                 )

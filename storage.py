@@ -19,6 +19,8 @@ class CommentStorage:
         self.filepath = filepath
         self.notified_rpids: Set[int] = set()
         self.current_post_key: Optional[str] = None
+        # Used to avoid flapping between different "latest" sources (e.g. charge-only vs public).
+        self.current_post_created: Optional[int] = None
         self.tracked_roots: List[int] = []
         self._load()
 
@@ -27,6 +29,7 @@ class CommentStorage:
             print("📂 没有找到历史记录文件，将创建新文件")
             self.notified_rpids = set()
             self.current_post_key = None
+            self.current_post_created = None
             self.tracked_roots = []
             return
 
@@ -37,12 +40,18 @@ class CommentStorage:
             print(f"⚠️ 加载历史记录失败: {exc}")
             self.notified_rpids = set()
             self.current_post_key = None
+            self.current_post_created = None
             self.tracked_roots = []
             return
 
         # 新格式
         if "current_post_key" in data:
             self.current_post_key = data.get("current_post_key")
+            raw_created = data.get("current_post_created")
+            try:
+                self.current_post_created = int(raw_created) if raw_created is not None else None
+            except Exception:
+                self.current_post_created = None
             self.notified_rpids = set(data.get("rpids", []))
             self.tracked_roots = [int(x) for x in data.get("tracked_roots", []) if str(x).isdigit()]
             print(f"📂 已加载 {len(self.notified_rpids)} 条历史评论记录")
@@ -52,6 +61,7 @@ class CommentStorage:
         self.notified_rpids = set(data.get("rpids", []))
         legacy_bvid = data.get("current_video_bvid")
         self.current_post_key = f"video:{legacy_bvid}" if legacy_bvid else None
+        self.current_post_created = None
         self.tracked_roots = []
         print(f"📂 已加载 {len(self.notified_rpids)} 条历史评论记录")
 
@@ -64,6 +74,7 @@ class CommentStorage:
             data: Dict = {
                 "rpids": list(self.notified_rpids),
                 "current_post_key": self.current_post_key,
+                "current_post_created": self.current_post_created,
                 "tracked_roots": self.tracked_roots,
             }
 
@@ -79,7 +90,10 @@ class CommentStorage:
     def is_new_post(self, post_key: str) -> bool:
         return self.current_post_key != post_key
 
-    def switch_post(self, post_key: str):
+    def get_current_post_created(self) -> Optional[int]:
+        return self.current_post_created
+
+    def switch_post(self, post_key: str, created: Optional[int] = None):
         if self.current_post_key == post_key:
             return
 
@@ -88,6 +102,7 @@ class CommentStorage:
         self.notified_rpids.clear()
         self.tracked_roots.clear()
         self.current_post_key = post_key
+        self.current_post_created = int(created) if created is not None else None
         self._save()
 
     # ----------------------------
