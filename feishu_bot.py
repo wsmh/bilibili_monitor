@@ -32,6 +32,29 @@ def build_reply_to_markdown(reply_to: Dict) -> str:
     return f"回复原评论：\n> {content}"
 
 
+def truncate_text(value: str, limit: int) -> str:
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 1)] + "…"
+
+
+def format_currency_cent(value) -> str:
+    try:
+        cents = int(value)
+    except (TypeError, ValueError):
+        return ""
+
+    if cents <= 0:
+        return ""
+
+    if cents % 100 == 0:
+        return f"¥{cents // 100}"
+    return f"¥{cents / 100:.2f}"
+
+
 class FeishuBot:
     """飞书机器人推送"""
 
@@ -206,6 +229,136 @@ class FeishuBot:
                         "content": f"{labels['prefix']} UP主发了 {len(comments)} 条新评论",
                     },
                     "template": "green",
+                },
+                "elements": elements,
+            },
+        }
+
+        return self._send(payload)
+
+    def send_upower_qa_answer(self, up_label: str, answer: Dict) -> bool:
+        """发送充电问答（upower）UP 回复通知。"""
+
+        answer_time_value = int(answer.get("answer_time") or 0)
+        answer_time = (
+            datetime.fromtimestamp(answer_time_value).strftime("%Y-%m-%d %H:%M:%S")
+            if answer_time_value
+            else ""
+        )
+
+        level_name = (answer.get("level_name") or "").strip()
+        level_price = format_currency_cent(answer.get("level_price"))
+        level_label = ""
+        if level_name and level_price:
+            level_label = f"{level_name} ({level_price})"
+        elif level_name:
+            level_label = level_name
+
+        question_nickname = (answer.get("question_nickname") or "").strip() or "匿名"
+        question_text = truncate_text(answer.get("question_text"), 600)
+        answer_text = truncate_text(answer.get("answer_text"), 800)
+        qa_id = answer.get("qa_id")
+
+        meta_parts = []
+        if answer_time:
+            meta_parts.append(f"🕐 {answer_time}")
+        if level_label:
+            meta_parts.append(f"⭐ {level_label}")
+        if qa_id is not None:
+            meta_parts.append(f"🆔 qa_id={qa_id}")
+
+        elements: List[Dict] = [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": "\n".join(meta_parts) if meta_parts else "（无元信息）",
+                },
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"🙋 **{question_nickname}**：\n> {question_text or '（无文本）'}",
+                },
+            },
+            {"tag": "hr"},
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"✅ **{up_label}** 回复：\n> {answer_text or '（无文本）'}",
+                },
+            },
+        ]
+
+        payload = {
+            "msg_type": "interactive",
+            "card": {
+                "config": {"wide_screen_mode": True},
+                "header": {
+                    "title": {"tag": "plain_text", "content": "💡 充电问答新回复"},
+                    "template": "orange",
+                },
+                "elements": elements,
+            },
+        }
+
+        return self._send(payload)
+
+    def send_multiple_upower_qa_answers(self, up_label: str, answers: List[Dict]) -> bool:
+        if not answers:
+            return True
+
+        elements: List[Dict] = []
+        for answer in answers:
+            answer_time_value = int(answer.get("answer_time") or 0)
+            answer_time = (
+                datetime.fromtimestamp(answer_time_value).strftime("%m-%d %H:%M")
+                if answer_time_value
+                else ""
+            )
+            qa_id = answer.get("qa_id")
+            question_nickname = (answer.get("question_nickname") or "").strip() or "匿名"
+            answer_text = truncate_text(answer.get("answer_text"), 350)
+
+            header = " ".join(
+                part
+                for part in [
+                    f"🕐 {answer_time}" if answer_time else "",
+                    f"qa_id={qa_id}" if qa_id is not None else "",
+                ]
+                if part
+            )
+
+            elements.append(
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": (
+                            f"**{header}**\n"
+                            f"🙋 {question_nickname}\n"
+                            f"> {answer_text or '（无文本）'}"
+                        ).strip(),
+                    },
+                }
+            )
+            elements.append({"tag": "hr"})
+
+        if elements:
+            elements.pop()
+
+        payload = {
+            "msg_type": "interactive",
+            "card": {
+                "config": {"wide_screen_mode": True},
+                "header": {
+                    "title": {
+                        "tag": "plain_text",
+                        "content": f"💡 充电问答：{up_label} 新回复 {len(answers)} 条",
+                    },
+                    "template": "orange",
                 },
                 "elements": elements,
             },

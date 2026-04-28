@@ -19,9 +19,13 @@ class CommentStorage:
         self.filepath = filepath
         self.notified_rpids: Set[int] = set()
         self.current_post_key: Optional[str] = None
-        # Used to avoid flapping between different "latest" sources (e.g. charge-only vs public).
-        self.current_post_created: Optional[int] = None
         self.tracked_roots: List[int] = []
+
+        # 充电问答（upower）模块：用 answer content_id 去重
+        self.notified_upower_answer_ids: List[int] = []
+        self._notified_upower_answer_id_set: Set[int] = set()
+        self.upower_initialized: bool = False
+
         self._load()
 
     def _load(self):
@@ -29,8 +33,10 @@ class CommentStorage:
             print("📂 没有找到历史记录文件，将创建新文件")
             self.notified_rpids = set()
             self.current_post_key = None
-            self.current_post_created = None
             self.tracked_roots = []
+            self.notified_upower_answer_ids = []
+            self._notified_upower_answer_id_set = set()
+            self.upower_initialized = False
             return
 
         try:
@@ -40,28 +46,36 @@ class CommentStorage:
             print(f"⚠️ 加载历史记录失败: {exc}")
             self.notified_rpids = set()
             self.current_post_key = None
-            self.current_post_created = None
             self.tracked_roots = []
+            self.notified_upower_answer_ids = []
+            self._notified_upower_answer_id_set = set()
+            self.upower_initialized = False
             return
 
         # 新格式
         if "current_post_key" in data:
             self.current_post_key = data.get("current_post_key")
-            raw_created = data.get("current_post_created")
-            try:
-                self.current_post_created = int(raw_created) if raw_created is not None else None
-            except Exception:
-                self.current_post_created = None
             self.notified_rpids = set(data.get("rpids", []))
             self.tracked_roots = [int(x) for x in data.get("tracked_roots", []) if str(x).isdigit()]
-            print(f"📂 已加载 {len(self.notified_rpids)} 条历史评论记录")
+
+            self.notified_upower_answer_ids = [
+                int(x)
+                for x in data.get("upower_answer_ids", [])
+                if str(x).isdigit()
+            ]
+            self._notified_upower_answer_id_set = set(self.notified_upower_answer_ids)
+            self.upower_initialized = bool(data.get("upower_initialized", False))
+
+            print(
+                f"📂 已加载 {len(self.notified_rpids)} 条历史评论记录，"
+                f"{len(self.notified_upower_answer_ids)} 条充电问答记录"
+            )
             return
 
         # 旧格式：仅支持视频
         self.notified_rpids = set(data.get("rpids", []))
         legacy_bvid = data.get("current_video_bvid")
         self.current_post_key = f"video:{legacy_bvid}" if legacy_bvid else None
-        self.current_post_created = None
         self.tracked_roots = []
         print(f"📂 已加载 {len(self.notified_rpids)} 条历史评论记录")
 
@@ -74,8 +88,9 @@ class CommentStorage:
             data: Dict = {
                 "rpids": list(self.notified_rpids),
                 "current_post_key": self.current_post_key,
-                "current_post_created": self.current_post_created,
                 "tracked_roots": self.tracked_roots,
+                "upower_answer_ids": self.notified_upower_answer_ids,
+                "upower_initialized": self.upower_initialized,
             }
 
             # 为了让旧版本还能读取（可选）
@@ -90,10 +105,7 @@ class CommentStorage:
     def is_new_post(self, post_key: str) -> bool:
         return self.current_post_key != post_key
 
-    def get_current_post_created(self) -> Optional[int]:
-        return self.current_post_created
-
-    def switch_post(self, post_key: str, created: Optional[int] = None):
+    def switch_post(self, post_key: str):
         if self.current_post_key == post_key:
             return
 
@@ -102,7 +114,6 @@ class CommentStorage:
         self.notified_rpids.clear()
         self.tracked_roots.clear()
         self.current_post_key = post_key
-        self.current_post_created = int(created) if created is not None else None
         self._save()
 
     # ----------------------------
@@ -128,6 +139,58 @@ class CommentStorage:
 
     def mark_multiple_notified(self, rpids: List[int]):
         self.notified_rpids.update(rpids)
+        self._save()
+
+    # ----------------------------
+    # Upower QA dedup
+    # ----------------------------
+
+    def is_upower_answer_notified(self, content_id: int) -> bool:
+        return int(content_id) in self._notified_upower_answer_id_set
+
+    def mark_upower_answer_notified(self, content_id: int, max_items: int):
+        content_id = int(content_id)
+        if content_id in self._notified_upower_answer_id_set:
+            return
+
+        self._notified_upower_answer_id_set.add(content_id)
+        self.notified_upower_answer_ids.insert(0, content_id)
+
+        if max_items > 0 and len(self.notified_upower_answer_ids) > max_items:
+            removed = self.notified_upower_answer_ids[max_items:]
+            self.notified_upower_answer_ids = self.notified_upower_answer_ids[:max_items]
+            for item in removed:
+                self._notified_upower_answer_id_set.discard(int(item))
+
+        self._save()
+
+    def mark_multiple_upower_answers_notified(self, content_ids: List[int], max_items: int):
+        changed = False
+        for content_id in content_ids:
+            content_id = int(content_id)
+            if content_id in self._notified_upower_answer_id_set:
+                continue
+
+            self._notified_upower_answer_id_set.add(content_id)
+            self.notified_upower_answer_ids.insert(0, content_id)
+            changed = True
+
+        if not changed:
+            return
+
+        if max_items > 0 and len(self.notified_upower_answer_ids) > max_items:
+            removed = self.notified_upower_answer_ids[max_items:]
+            self.notified_upower_answer_ids = self.notified_upower_answer_ids[:max_items]
+            for item in removed:
+                self._notified_upower_answer_id_set.discard(int(item))
+
+        self._save()
+
+    def set_upower_initialized(self, value: bool = True):
+        value = bool(value)
+        if self.upower_initialized == value:
+            return
+        self.upower_initialized = value
         self._save()
 
     # ----------------------------
@@ -157,4 +220,5 @@ class CommentStorage:
             "total_notified": len(self.notified_rpids),
             "current_post_key": self.current_post_key,
             "tracked_roots": self.tracked_roots,
+            "total_upower_answers": len(self.notified_upower_answer_ids),
         }

@@ -5,6 +5,7 @@
 - 监控指定 `UP_UID` 的最新发布内容（优先从空间动态流获取：视频 / 动态 / 充电相关内容）
 - 检测到发布新内容时发送飞书通知
 - 检测到该 UP 主在该内容下发表评论或回复时发送飞书通知
+- 监控充电问答（upower）模块里该 UP 的新回复并推送飞书（需登录态）
 
 ## 运行前准备
 
@@ -63,6 +64,8 @@ BILI_FETCH_MODE=api
 
 如果你发现 UP 在同一个评论线程下连续回复多次但偶尔漏推送，可以开启/调整线程扫描（默认开启）：`TRACKED_THREAD_SCAN_ENABLED/TRACKED_THREAD_MAX_ROOTS/TRACKED_THREAD_MAX_PAGES`。
 
+充电问答（upower）更新相对较慢，默认每 10 分钟扫描一次，可通过 `UPOWER_QA_SCAN_INTERVAL_SECONDS` 调整。
+
 如果你想强制改回 API 模式，修改 `.env` 文件：
 
 ```bash
@@ -116,7 +119,7 @@ BILI_BROWSER_EXECUTABLE=C:\Program Files\Google\Chrome\Application\chrome.exe
 
 ## 配置文件说明
 
-所有配置都通过 `.env` 文件管理，主要配置项：
+所有配置都通过 `.env` 文件管理，主要配置项（充电问答相关见 `UPOWER_QA_*`）：
 
 | 配置项                  | 说明                       | 默认值  |
 | ----------------------- | -------------------------- | ------- |

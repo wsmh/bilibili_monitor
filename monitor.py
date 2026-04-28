@@ -21,6 +21,13 @@ from config import (
     TRACKED_THREAD_MAX_PAGES,
     TRACKED_THREAD_MAX_ROOTS,
     TRACKED_THREAD_SCAN_ENABLED,
+    UPOWER_QA_ENABLED,
+    UPOWER_QA_FANS_FILTER,
+    UPOWER_QA_MAX_NOTIFIED,
+    UPOWER_QA_PRIVILEGE_TYPE,
+    UPOWER_QA_PS,
+    UPOWER_QA_SCAN_INTERVAL_SECONDS,
+    UPOWER_QA_UP_FILTER,
     UP_UID,
 )
 from feishu_bot import FeishuBot
@@ -88,6 +95,8 @@ class BilibiliMonitor:
         self.cooldown_until = 0.0
         self.last_block_alert_at = 0.0
         self.login_status_checked = False
+        self.monitored_up_label = str(UP_UID)
+        self.last_upower_scan_at = 0.0
 
         print("=" * 60)
         print("🎬 B站UP主评论监控器")
@@ -105,14 +114,14 @@ class BilibiliMonitor:
 
         print("\n🚀 启动监控...\n")
         await self._check_login_status()
-        monitored_up_label = format_monitored_up_label(
+        self.monitored_up_label = format_monitored_up_label(
             UP_UID,
             await self.bilibili.get_user_profile(UP_UID),
         )
 
         self.feishu.send_text(
             "🚀 B站评论监控已启动\n"
-            f"👤 监控UP主: {monitored_up_label}\n"
+            f"👤 监控UP主: {self.monitored_up_label}\n"
             f"⏰ 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
@@ -154,137 +163,121 @@ class BilibiliMonitor:
         """执行一次检查"""
 
         try:
-            post = await self.bilibili.get_latest_post(UP_UID)
+            post = None
+            try:
+                post = await self.bilibili.get_latest_post(UP_UID)
+            except SecurityControlError:
+                raise
+            except Exception as exc:
+                print(f"⚠️ 获取最新内容失败: {exc}")
+
             if not post:
-                print("❌ 无法获取最新内容")
-                return
-
-            kind = post.get("kind") or "video"
-            kind_label = get_post_kind_label(kind)
-            kind_emoji = get_post_kind_emoji(kind)
-
-            title = post.get("title") or ""
-            link = post.get("link") or ""
-
-            print(f"{kind_emoji} 最新{kind_label}: {title[:50]}...")
-            print(f"🔗 链接: {link}")
-
-            post_key = post.get("post_key")
-            post_created = int(post.get("created") or 0)
-            if post_key and self.storage.is_new_post(post_key):
-                stored_created = self.storage.get_current_post_created()
-                # Prevent flapping between different "latest" sources: never switch to an older post.
-                if stored_created is not None and post_created and post_created < stored_created:
-                    print(
-                        "⚠️ 检测到较旧的最新内容结果，忽略以避免来回切换："
-                        f"candidate={post_key}({post_created}) < current={self.storage.current_post_key}({stored_created})"
-                    )
-                    return
-
-                self.storage.switch_post(post_key, created=post_created or None)
-                self.feishu.send_text(
-                    f"{kind_emoji} 检测到UP主发布新{kind_label}！\n" f"📌 {title}\n" f"🔗 {link}"
-                )
-
-            comments = await self.bilibili.get_post_comments(post)
-            if not comments:
-                print("📭 暂无评论")
-                return
-
-            print(f"💬 本轮获取到 {len(comments)} 条最新评论/回复")
-
-            tracked_up_comments = []
-            if TRACKED_THREAD_SCAN_ENABLED:
-                # Proactively scan a small set of the most recent root threads from the current window,
-                # so we can catch UP replies that are not included in the first few nested replies.
-                candidate_roots = []
-                for item in comments:
-                    if not isinstance(item, dict):
-                        continue
-                    parent = int(item.get("parent") or 0)
-                    ctime = int(item.get("ctime") or 0)
-
-                    if parent == 0:
-                        rpid = item.get("rpid")
-                        if rpid is None:
-                            continue
-                        root_rpid = int(rpid)
-                    else:
-                        # For replies, prefer explicit root; fall back to parent.
-                        root_rpid = int(item.get("root") or parent)
-
-                    if root_rpid:
-                        candidate_roots.append((ctime, root_rpid))
-
-                candidate_roots.sort(reverse=True)
-                recent_roots = [root for _, root in candidate_roots[:TRACKED_THREAD_MAX_ROOTS]]
-
-                roots_to_scan = list(dict.fromkeys(self.storage.get_tracked_roots() + recent_roots))
-                tracked_up_comments = await self.bilibili.get_up_replies_from_tracked_threads(
-                    post,
-                    roots_to_scan,
-                    UP_UID,
-                    TRACKED_THREAD_MAX_PAGES,
-                )
-
-            up_comments = self.bilibili.filter_up_comments(comments, UP_UID)
-            if tracked_up_comments:
-                merged = {comment["rpid"]: comment for comment in up_comments}
-                for comment in tracked_up_comments:
-                    merged.setdefault(comment["rpid"], comment)
-                up_comments = sorted(
-                    merged.values(),
-                    key=lambda item: item.get("ctime", 0),
-                    reverse=True,
-                )
-
-            if not up_comments:
-                print("📝 UP主暂未发表评论")
-                return
-
-            # 记录被回复的根评论，后续补齐同线程多次回复
-            if TRACKED_THREAD_SCAN_ENABLED:
-                roots = []
-                for comment in up_comments:
-                    parent = int(comment.get("parent") or 0)
-                    if parent == 0:
-                        continue
-                    root = int(comment.get("root") or parent)
-                    roots.append(root)
-                if roots:
-                    self.storage.track_roots(roots, TRACKED_THREAD_MAX_ROOTS)
-
-            print(f"📝 找到 {len(up_comments)} 条UP主评论")
-
-            new_comments = [
-                comment for comment in up_comments if not self.storage.is_notified(comment["rpid"])
-            ]
-
-            if not new_comments:
-                print("✅ 没有新评论需要通知")
-                return
-
-            print(f"🆕 发现 {len(new_comments)} 条新评论")
-
-            post_info = {
-                "kind": kind,
-                "title": title,
-                "link": link,
-                "comment_type": post.get("comment_type"),
-                "comment_oid": post.get("comment_oid"),
-            }
-
-            await self.bilibili.enrich_reply_context(post, new_comments, comments)
-
-            if len(new_comments) == 1:
-                success = self.feishu.send_up_comment(post_info, new_comments[0])
-                if success:
-                    self.storage.mark_notified(new_comments[0]["rpid"])
+                print("❌ 无法获取最新内容（将跳过内容评论检查）")
             else:
-                success = self.feishu.send_multiple_comments(post_info, new_comments)
-                if success:
-                    rpids = [comment["rpid"] for comment in new_comments]
-                    self.storage.mark_multiple_notified(rpids)
+                kind = post.get("kind") or "video"
+                kind_label = get_post_kind_label(kind)
+                kind_emoji = get_post_kind_emoji(kind)
+
+                title = post.get("title") or ""
+                link = post.get("link") or ""
+
+                print(f"{kind_emoji} 最新{kind_label}: {title[:50]}...")
+                print(f"🔗 链接: {link}")
+
+                post_key = post.get("post_key")
+                if post_key and self.storage.is_new_post(post_key):
+                    self.storage.switch_post(post_key)
+                    self.feishu.send_text(
+                        f"{kind_emoji} 检测到UP主发布新{kind_label}！\n"
+                        f"📌 {title}\n"
+                        f"🔗 {link}"
+                    )
+
+                comments = await self.bilibili.get_post_comments(post)
+                if not comments:
+                    print("📭 暂无评论")
+                else:
+                    print(f"💬 本轮获取到 {len(comments)} 条最新评论/回复")
+
+                    tracked_up_comments = []
+                    if TRACKED_THREAD_SCAN_ENABLED:
+                        tracked_up_comments = await self.bilibili.get_up_replies_from_tracked_threads(
+                            post,
+                            self.storage.get_tracked_roots(),
+                            UP_UID,
+                            TRACKED_THREAD_MAX_PAGES,
+                        )
+
+                    up_comments = self.bilibili.filter_up_comments(comments, UP_UID)
+                    if tracked_up_comments:
+                        merged = {comment["rpid"]: comment for comment in up_comments}
+                        for comment in tracked_up_comments:
+                            merged.setdefault(comment["rpid"], comment)
+                        up_comments = sorted(
+                            merged.values(),
+                            key=lambda item: item.get("ctime", 0),
+                            reverse=True,
+                        )
+
+                    if not up_comments:
+                        print("📝 UP主暂未发表评论")
+                    else:
+                        # 记录被回复的根评论，后续补齐同线程多次回复
+                        if TRACKED_THREAD_SCAN_ENABLED:
+                            roots = []
+                            for comment in up_comments:
+                                parent = int(comment.get("parent") or 0)
+                                if parent == 0:
+                                    continue
+                                root = int(comment.get("root") or parent)
+                                roots.append(root)
+                            if roots:
+                                self.storage.track_roots(roots, TRACKED_THREAD_MAX_ROOTS)
+
+                        print(f"📝 找到 {len(up_comments)} 条UP主评论")
+
+                        new_comments = [
+                            comment
+                            for comment in up_comments
+                            if not self.storage.is_notified(comment["rpid"])
+                        ]
+
+                        if not new_comments:
+                            print("✅ 没有新评论需要通知")
+                        else:
+                            print(f"🆕 发现 {len(new_comments)} 条新评论")
+
+                            post_info = {
+                                "kind": kind,
+                                "title": title,
+                                "link": link,
+                                "comment_type": post.get("comment_type"),
+                                "comment_oid": post.get("comment_oid"),
+                            }
+
+                            await self.bilibili.enrich_reply_context(post, new_comments, comments)
+
+                            if len(new_comments) == 1:
+                                success = self.feishu.send_up_comment(post_info, new_comments[0])
+                                if success:
+                                    self.storage.mark_notified(new_comments[0]["rpid"])
+                            else:
+                                success = self.feishu.send_multiple_comments(post_info, new_comments)
+                                if success:
+                                    rpids = [comment["rpid"] for comment in new_comments]
+                                    self.storage.mark_multiple_notified(rpids)
+
+            if UPOWER_QA_ENABLED:
+                now = time.time()
+                if (
+                    self.last_upower_scan_at <= 0
+                    or now - self.last_upower_scan_at >= UPOWER_QA_SCAN_INTERVAL_SECONDS
+                ):
+                    self.last_upower_scan_at = now
+                    await self._check_upower_qa_once()
+                else:
+                    wait_seconds = int(UPOWER_QA_SCAN_INTERVAL_SECONDS - (now - self.last_upower_scan_at))
+                    print(f"💡 充电问答：距离下次扫描还需 {max(wait_seconds, 0)} 秒")
 
         except SecurityControlError as exc:
             self.cooldown_until = time.time() + SECURITY_COOLDOWN_SECONDS
@@ -299,6 +292,64 @@ class BilibiliMonitor:
                 self.last_block_alert_at = time.time()
         except Exception as exc:
             print(f"❌ 检查过程出错: {exc}")
+
+    async def _check_upower_qa_once(self):
+        try:
+            answers = await self.bilibili.get_upower_qa_answers(
+                up_mid=UP_UID,
+                privilege_type=UPOWER_QA_PRIVILEGE_TYPE,
+                fans_filter=UPOWER_QA_FANS_FILTER,
+                up_filter=UPOWER_QA_UP_FILTER,
+                ps=UPOWER_QA_PS,
+            )
+        except SecurityControlError:
+            raise
+        except Exception as exc:
+            print(f"⚠️ 获取充电问答失败: {exc}")
+            return
+
+        if not answers:
+            print("💡 充电问答：暂无可见回复")
+            return
+
+        if not self.storage.upower_initialized:
+            content_ids = [item.get("content_id") for item in answers if item.get("content_id") is not None]
+            self.storage.mark_multiple_upower_answers_notified(
+                [int(value) for value in content_ids if str(value).isdigit()],
+                UPOWER_QA_MAX_NOTIFIED,
+            )
+            self.storage.set_upower_initialized(True)
+            print("💡 充电问答：已初始化去重（本轮不推送历史回复）")
+            return
+
+        new_answers = [
+            item
+            for item in answers
+            if item.get("content_id") is not None
+            and not self.storage.is_upower_answer_notified(int(item["content_id"]))
+        ]
+
+        if not new_answers:
+            print("✅ 充电问答：没有新回复需要通知")
+            return
+
+        print(f"🆕 充电问答：发现 {len(new_answers)} 条新回复")
+
+        if len(new_answers) == 1:
+            success = self.feishu.send_upower_qa_answer(self.monitored_up_label, new_answers[0])
+            if success:
+                self.storage.mark_upower_answer_notified(
+                    int(new_answers[0]["content_id"]),
+                    UPOWER_QA_MAX_NOTIFIED,
+                )
+        else:
+            success = self.feishu.send_multiple_upower_qa_answers(
+                self.monitored_up_label,
+                new_answers,
+            )
+            if success:
+                content_ids = [int(item["content_id"]) for item in new_answers]
+                self.storage.mark_multiple_upower_answers_notified(content_ids, UPOWER_QA_MAX_NOTIFIED)
 
     async def _check_login_status(self):
         if self.login_status_checked:

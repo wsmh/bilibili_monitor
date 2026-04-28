@@ -40,6 +40,67 @@ class BilibiliAPITestCase(unittest.TestCase):
         self.assertEqual(api._get_comment_page_limit(), 2)
         self.assertEqual(api.credential.buvid3, "test_buvid3")
 
+    def test_extract_upower_qa_answers_only_keeps_up_answers_and_sorts(self):
+        api = BilibiliAPI(fetch_mode="api", cookie_string="SESSDATA=test")
+        data = {
+            "list": [
+                {
+                    "qa_id": 1,
+                    "upower_level": {"level_name": "高档充电", "level_type": 20, "level_price": 30000},
+                    "question": {"user": {"nickname": "asker", "mid": 2}},
+                    "answer": {"answer_time": 123},
+                    "content_list": [
+                        {
+                            "id": 10,
+                            "type": 1,
+                            "state": 2,
+                            "ptime": 111,
+                            "text": "Q1",
+                            "user": {"nickname": "asker", "mid": 2},
+                        },
+                        {
+                            "id": 11,
+                            "type": 2,
+                            "state": 2,
+                            "ptime": 222,
+                            "text": "A1",
+                            "user": {"nickname": "up", "mid": 9},
+                        },
+                        {
+                            "id": 12,
+                            "type": 2,
+                            "state": 2,
+                            "ptime": 333,
+                            "text": "other",
+                            "user": {"nickname": "someone", "mid": 3},
+                        },
+                    ],
+                },
+                {
+                    "qa_id": 2,
+                    "upower_level": {"level_name": "高档充电", "level_type": 20, "level_price": 30000},
+                    "question": {"user": {"nickname": "asker2", "mid": 4}},
+                    "answer": {"answer_time": 444},
+                    "content_list": [
+                        {
+                            "id": 20,
+                            "type": 2,
+                            "state": 2,
+                            "ptime": 555,
+                            "text": "A2",
+                            "user": {"nickname": "up", "mid": 9},
+                        }
+                    ],
+                },
+            ]
+        }
+
+        answers = api.extract_upower_qa_answers(data, up_mid=9)
+
+        self.assertEqual([entry["content_id"] for entry in answers], [20, 11])
+        self.assertEqual(answers[0]["question_nickname"], "asker2")
+        self.assertEqual(answers[1]["question_text"], "Q1")
+
 
 class BilibiliAPIAsyncTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_get_latest_video_propagates_security_control_error(self):

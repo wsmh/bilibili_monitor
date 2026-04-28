@@ -62,6 +62,15 @@ TRACKED_THREAD_SCAN_ENABLED = (
 TRACKED_THREAD_MAX_ROOTS = int(os.getenv("TRACKED_THREAD_MAX_ROOTS", "5"))
 TRACKED_THREAD_MAX_PAGES = int(os.getenv("TRACKED_THREAD_MAX_PAGES", "3"))
 
+# 充电问答（upower）监控配置
+UPOWER_QA_ENABLED = os.getenv("UPOWER_QA_ENABLED", "true").strip().lower() != "false"
+UPOWER_QA_PRIVILEGE_TYPE = int(os.getenv("UPOWER_QA_PRIVILEGE_TYPE", "0"))
+UPOWER_QA_FANS_FILTER = int(os.getenv("UPOWER_QA_FANS_FILTER", "0"))
+UPOWER_QA_UP_FILTER = int(os.getenv("UPOWER_QA_UP_FILTER", "0"))
+UPOWER_QA_PS = int(os.getenv("UPOWER_QA_PS", "20"))
+UPOWER_QA_MAX_NOTIFIED = int(os.getenv("UPOWER_QA_MAX_NOTIFIED", "200"))
+UPOWER_QA_SCAN_INTERVAL_SECONDS = int(os.getenv("UPOWER_QA_SCAN_INTERVAL_SECONDS", "600"))
+
 # 轮询时段配置
 PEAK_START = _parse_time_env("PEAK_START", "09:20")
 PEAK_END = _parse_time_env("PEAK_END", "09:40")
