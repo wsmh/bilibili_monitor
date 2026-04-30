@@ -71,6 +71,12 @@ UPOWER_QA_PS = int(os.getenv("UPOWER_QA_PS", "20"))
 UPOWER_QA_MAX_NOTIFIED = int(os.getenv("UPOWER_QA_MAX_NOTIFIED", "200"))
 UPOWER_QA_SCAN_INTERVAL_SECONDS = int(os.getenv("UPOWER_QA_SCAN_INTERVAL_SECONDS", "600"))
 
+# 首次启动行为：
+# warmup: 仅初始化去重，不推送历史回复（默认，避免刷屏）
+# notify: 首次启动推送最近 N 条可见回复
+UPOWER_QA_INIT_MODE = os.getenv("UPOWER_QA_INIT_MODE", "warmup").strip().lower()
+UPOWER_QA_INIT_NOTIFY_LIMIT = int(os.getenv("UPOWER_QA_INIT_NOTIFY_LIMIT", "1"))
+
 # 轮询时段配置
 PEAK_START = _parse_time_env("PEAK_START", "09:20")
 PEAK_END = _parse_time_env("PEAK_END", "09:40")

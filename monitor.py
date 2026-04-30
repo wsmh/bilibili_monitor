@@ -23,6 +23,8 @@ from config import (
     TRACKED_THREAD_SCAN_ENABLED,
     UPOWER_QA_ENABLED,
     UPOWER_QA_FANS_FILTER,
+    UPOWER_QA_INIT_MODE,
+    UPOWER_QA_INIT_NOTIFY_LIMIT,
     UPOWER_QA_MAX_NOTIFIED,
     UPOWER_QA_PRIVILEGE_TYPE,
     UPOWER_QA_PS,
@@ -313,11 +315,38 @@ class BilibiliMonitor:
             return
 
         if not self.storage.upower_initialized:
-            content_ids = [item.get("content_id") for item in answers if item.get("content_id") is not None]
-            self.storage.mark_multiple_upower_answers_notified(
-                [int(value) for value in content_ids if str(value).isdigit()],
-                UPOWER_QA_MAX_NOTIFIED,
-            )
+            content_ids = [
+                item.get("content_id")
+                for item in answers
+                if item.get("content_id") is not None and str(item.get("content_id")).isdigit()
+            ]
+
+            init_mode = (UPOWER_QA_INIT_MODE or "warmup").strip().lower()
+            if init_mode == "notify":
+                limit = max(1, int(UPOWER_QA_INIT_NOTIFY_LIMIT or 1))
+                initial_answers = answers[:limit]
+
+                if len(initial_answers) == 1:
+                    success = self.feishu.send_upower_qa_answer(
+                        self.monitored_up_label,
+                        initial_answers[0],
+                    )
+                else:
+                    success = self.feishu.send_multiple_upower_qa_answers(
+                        self.monitored_up_label,
+                        initial_answers,
+                    )
+
+                if success:
+                    # 初始化后避免下一轮再次推送历史
+                    self.storage.mark_multiple_upower_answers_notified(content_ids, UPOWER_QA_MAX_NOTIFIED)
+                    self.storage.set_upower_initialized(True)
+                    print(f"💡 充电问答：首次启动已推送 {len(initial_answers)} 条最新回复，并完成去重初始化")
+                else:
+                    print("⚠️ 充电问答：首次启动推送失败，将在下次扫描重试")
+                return
+
+            self.storage.mark_multiple_upower_answers_notified(content_ids, UPOWER_QA_MAX_NOTIFIED)
             self.storage.set_upower_initialized(True)
             print("💡 充电问答：已初始化去重（本轮不推送历史回复）")
             return

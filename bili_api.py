@@ -4,8 +4,7 @@ import time
 from typing import Dict, List, Optional
 
 import requests
-from bilibili_api import Credential, comment, user
-from bilibili_api.comment import CommentResourceType
+from bilibili_api import Credential, user
 
 from browser_fetcher import (
     BrowserBilibiliFetcher,
@@ -533,17 +532,20 @@ class BilibiliAPI:
         return self.extract_upower_qa_answers(data, up_mid)
 
     async def get_video_comments(self, aid: int) -> List[Dict]:
-        """获取视频的评论列表（使用get_comments_lazy新接口，带重试机制）"""
+        """获取视频的评论列表。
 
+        说明：
+        - browser 模式：先尝试页面抓取（用于规避 412 风控），但可能只拿到首屏。
+        - auto 模式：页面抓取成功后，再用 HTTP 接口补齐更多页/更多楼中楼并合并去重。
+        - api 模式：直接走 HTTP 接口。
+        """
+
+        browser_comments: List[Dict] = []
         if self.prefers_browser_fetch():
             try:
-                comments = await self.browser_fetcher.get_video_comments(
+                browser_comments = await self.browser_fetcher.get_video_comments(
                     f"https://www.bilibili.com/video/av{aid}"
                 )
-                if comments:
-                    return comments
-                if self.fetch_mode == "browser":
-                    return comments
             except Exception as exc:
                 print(f"浏览器抓取评论失败: {exc}")
                 if self.fetch_mode == "browser":
@@ -551,88 +553,182 @@ class BilibiliAPI:
 
         comments_acc: List[Dict] = []
         seen_rpids = set()
-        page = 1
-        max_pages = self._get_comment_page_limit()
-        pag = ""  # pagination offset
 
-        async def _fetch_page(page_offset: str):
-            return await comment.get_comments_lazy(
-                oid=aid,
-                type_=CommentResourceType.VIDEO,
-                offset=page_offset,
-                credential=self.credential,
+        def _push(item: Dict):
+            if not isinstance(item, dict):
+                return
+            rpid = item.get("rpid")
+            if rpid is None or rpid in seen_rpids:
+                return
+            comments_acc.append(item)
+            seen_rpids.add(rpid)
+
+        for item in browser_comments or []:
+            _push(item)
+
+        # browser-only 模式：如果有抓到内容，直接返回；否则继续走 HTTP 兜底
+        if self.fetch_mode == "browser" and comments_acc:
+            return sorted(comments_acc, key=lambda entry: entry.get("ctime", 0), reverse=True)
+
+        max_pages = self._get_comment_page_limit()
+        if self.has_auth():
+            max_pages = max(max_pages, 5)
+        else:
+            max_pages = max(max_pages, 2)
+
+        page = 1
+
+        def _do_request(pn: int) -> Dict:
+            headers = {
+                "User-Agent": self._get_random_ua(),
+                "Referer": "https://www.bilibili.com",
+            }
+            if self.cookie_string:
+                headers["Cookie"] = self.cookie_string
+
+            response = requests.get(
+                "https://api.bilibili.com/x/v2/reply",
+                params={
+                    "type": 1,
+                    "oid": int(aid),
+                    "sort": 0,
+                    "nohot": 0,
+                    "ps": 20,
+                    "pn": int(pn),
+                },
+                headers=headers,
+                timeout=10,
             )
+            if response.status_code == 412:
+                raise Exception(
+                    "412 - The request was rejected because of the bilibili security control policy"
+                )
+            response.raise_for_status()
+            return response.json()
 
         try:
             while page <= max_pages:
-                c = await self._retry_with_backoff(
-                    lambda: _fetch_page(pag),
+                payload = await self._retry_with_backoff(
+                    lambda: asyncio.to_thread(_do_request, page),
                     max_retries=3,
                     base_delay=0.5,
                 )
 
-                if "cursor" in c and "pagination_reply" in c["cursor"]:
-                    pag = c["cursor"]["pagination_reply"].get("next_offset", "")
-                else:
-                    pag = ""
+                if payload.get("code") != 0:
+                    code = payload.get("code")
+                    if code in {12002, 12009, -404}:
+                        break
+                    raise Exception(
+                        f"reply api failed: code={code} message={payload.get('message')}"
+                    )
 
-                replies = c.get("replies")
+                data = payload.get("data") or {}
+
+                reply_blocks: List[Dict] = []
+                for key in ("top", "hots", "replies"):
+                    block = data.get(key)
+                    if isinstance(block, list):
+                        reply_blocks.extend(block)
+                    elif isinstance(block, dict) and block.get("rpid"):
+                        reply_blocks.append(block)
+
+                replies = [
+                    item for item in reply_blocks if isinstance(item, dict) and item.get("rpid")
+                ]
                 if not replies:
                     break
 
+                thread_backfill_roots = 0
                 for reply in replies:
                     comment_data = {
-                        "rpid": reply["rpid"],
-                        "mid": reply["member"]["mid"],
-                        "uname": reply["member"]["uname"],
-                        "content": reply["content"]["message"],
-                        "ctime": reply["ctime"],
-                        "like": reply["count"],
-                        "parent": reply.get("parent", 0),
+                        "rpid": reply.get("rpid"),
+                        "mid": reply.get("member", {}).get("mid"),
+                        "uname": reply.get("member", {}).get("uname", ""),
+                        "content": reply.get("content", {}).get("message", ""),
+                        "ctime": reply.get("ctime", 0),
+                        "like": reply.get("like", reply.get("count", 0)),
+                        "parent": reply.get("parent", 0) or 0,
                         "root": reply.get("root", 0) or 0,
                         "dialog": reply.get("dialog", 0) or 0,
                     }
-                    if comment_data["rpid"] not in seen_rpids:
-                        comments_acc.append(comment_data)
-                        seen_rpids.add(comment_data["rpid"])
+                    _push(comment_data)
 
-                    if reply.get("replies"):
-                        for sub_reply in reply["replies"]:
-                            sub_comment = {
-                                "rpid": sub_reply["rpid"],
-                                "mid": sub_reply["member"]["mid"],
-                                "uname": sub_reply["member"]["uname"],
-                                "content": sub_reply["content"]["message"],
-                                "ctime": sub_reply["ctime"],
-                                "like": sub_reply["count"],
-                                "parent": sub_reply.get("parent", reply["rpid"]) or reply["rpid"],
-                                "root": sub_reply.get("root", reply["rpid"]) or reply["rpid"],
-                                "dialog": sub_reply.get("dialog", 0) or 0,
-                            }
-                            if sub_comment["rpid"] not in seen_rpids:
-                                comments_acc.append(sub_comment)
-                                seen_rpids.add(sub_comment["rpid"])
+                    preview_subs = reply.get("replies") or []
+                    for sub_reply in preview_subs:
+                        if not isinstance(sub_reply, dict) or not sub_reply.get("rpid"):
+                            continue
+                        sub_comment = {
+                            "rpid": sub_reply.get("rpid"),
+                            "mid": sub_reply.get("member", {}).get("mid"),
+                            "uname": sub_reply.get("member", {}).get("uname", ""),
+                            "content": sub_reply.get("content", {}).get("message", ""),
+                            "ctime": sub_reply.get("ctime", 0),
+                            "like": sub_reply.get("like", sub_reply.get("count", 0)),
+                            "parent": sub_reply.get("parent", reply.get("rpid")) or reply.get("rpid"),
+                            "root": sub_reply.get("root", reply.get("rpid")) or reply.get("rpid"),
+                            "dialog": sub_reply.get("dialog", 0) or 0,
+                        }
+                        _push(sub_comment)
+
+                    # 楼中楼补齐：如果总数比预览多，按需请求线程详情（限制 root 数量，避免过重）
+                    if thread_backfill_roots < 5:
+                        try:
+                            rcount = int(reply.get("rcount") or 0)
+                        except Exception:
+                            rcount = 0
+
+                        if rcount > len(preview_subs) and reply.get("rpid"):
+                            thread_backfill_roots += 1
+                            try:
+                                thread_map = await self._get_reply_thread_map_via_http(
+                                    int(aid),
+                                    1,
+                                    int(reply["rpid"]),
+                                    max_pages=3,
+                                )
+                                for item in thread_map.values():
+                                    _push(item)
+                            except Exception as exc:
+                                print(f"补齐楼中楼失败(root={reply.get('rpid')}): {exc}")
 
                 page += 1
-                if not pag:
-                    break
-
                 await asyncio.sleep(random.uniform(0.3, 0.6))
 
         except Exception as exc:
             if isinstance(exc, SecurityControlError):
+                # browser-only 下尽量保留已有结果
+                if self.fetch_mode == "browser" and comments_acc:
+                    return sorted(comments_acc, key=lambda entry: entry.get("ctime", 0), reverse=True)
                 raise
             print(f"获取评论失败: {exc}")
 
-        return comments_acc
+        return sorted(comments_acc, key=lambda entry: entry.get("ctime", 0), reverse=True)
 
     async def _get_reply_comments_via_http(self, oid: int, type_code: int) -> List[Dict]:
-        """通过 /x/v2/reply 获取评论（适用于动态/相簿/专栏等）。"""
+        """通过 /x/v2/reply 获取评论（适用于动态/相簿/专栏等）。
+
+        备注：接口里的楼中楼 replies 往往只是预览，必要时需要再调 /x/v2/reply/reply 补齐。
+        """
 
         comments_acc: List[Dict] = []
         seen_rpids = set()
+
+        def _push(item: Dict):
+            if not isinstance(item, dict):
+                return
+            rpid = item.get("rpid")
+            if rpid is None or rpid in seen_rpids:
+                return
+            comments_acc.append(item)
+            seen_rpids.add(rpid)
+
         page = 1
         max_pages = self._get_comment_page_limit()
+        # API-only 场景下，默认 1~2 页很容易造成“漏很多”，给一个更保守的下限
+        if self.has_auth():
+            max_pages = max(max_pages, 5)
+        else:
+            max_pages = max(max_pages, 2)
 
         def _do_request(pn: int) -> Dict:
             headers = {
@@ -648,7 +744,7 @@ class BilibiliAPI:
                     "type": type_code,
                     "oid": oid,
                     "sort": 0,
-                    "nohot": 1,
+                    "nohot": 0,
                     "ps": 20,
                     "pn": pn,
                 },
@@ -675,13 +771,32 @@ class BilibiliAPI:
                     raise Exception(f"reply api failed: code={code} message={payload.get('message')}")
 
                 data = payload.get("data") or {}
-                replies = data.get("replies") or []
+
+                reply_blocks: List[Dict] = []
+                for key in ("top", "hots", "replies"):
+                    block = data.get(key)
+                    if isinstance(block, list):
+                        reply_blocks.extend(block)
+                    elif isinstance(block, dict) and block.get("rpid"):
+                        reply_blocks.append(block)
+
+                # upper/top 置顶评论
+                upper = data.get("upper")
+                if isinstance(upper, dict):
+                    top_item = upper.get("top")
+                    if isinstance(top_item, dict) and top_item.get("rpid"):
+                        reply_blocks.append(top_item)
+
+                replies = [
+                    item for item in reply_blocks if isinstance(item, dict) and item.get("rpid")
+                ]
                 if not replies:
                     break
 
+                thread_backfill_roots = 0
                 for reply in replies:
                     comment_data = {
-                        "rpid": reply["rpid"],
+                        "rpid": reply.get("rpid"),
                         "mid": reply.get("member", {}).get("mid"),
                         "uname": reply.get("member", {}).get("uname", ""),
                         "content": reply.get("content", {}).get("message", ""),
@@ -691,25 +806,45 @@ class BilibiliAPI:
                         "root": reply.get("root", 0) or 0,
                         "dialog": reply.get("dialog", 0) or 0,
                     }
-                    if comment_data["rpid"] not in seen_rpids:
-                        comments_acc.append(comment_data)
-                        seen_rpids.add(comment_data["rpid"])
+                    _push(comment_data)
 
-                    for sub_reply in reply.get("replies") or []:
+                    preview_subs = reply.get("replies") or []
+                    for sub_reply in preview_subs:
+                        if not isinstance(sub_reply, dict) or not sub_reply.get("rpid"):
+                            continue
                         sub_comment = {
-                            "rpid": sub_reply["rpid"],
+                            "rpid": sub_reply.get("rpid"),
                             "mid": sub_reply.get("member", {}).get("mid"),
                             "uname": sub_reply.get("member", {}).get("uname", ""),
                             "content": sub_reply.get("content", {}).get("message", ""),
                             "ctime": sub_reply.get("ctime", 0),
                             "like": sub_reply.get("like", sub_reply.get("count", 0)),
-                            "parent": sub_reply.get("parent", reply["rpid"]) or reply["rpid"],
-                            "root": sub_reply.get("root", reply["rpid"]) or reply["rpid"],
+                            "parent": sub_reply.get("parent", reply.get("rpid")) or reply.get("rpid"),
+                            "root": sub_reply.get("root", reply.get("rpid")) or reply.get("rpid"),
                             "dialog": sub_reply.get("dialog", 0) or 0,
                         }
-                        if sub_comment["rpid"] not in seen_rpids:
-                            comments_acc.append(sub_comment)
-                            seen_rpids.add(sub_comment["rpid"])
+                        _push(sub_comment)
+
+                    # 楼中楼补齐：如果总数比预览多，按需请求线程详情（限制 root 数量，避免过重）
+                    if thread_backfill_roots < 5:
+                        try:
+                            rcount = int(reply.get("rcount") or 0)
+                        except Exception:
+                            rcount = 0
+
+                        if rcount > len(preview_subs) and reply.get("rpid"):
+                            thread_backfill_roots += 1
+                            try:
+                                thread_map = await self._get_reply_thread_map_via_http(
+                                    int(oid),
+                                    int(type_code),
+                                    int(reply["rpid"]),
+                                    max_pages=3,
+                                )
+                                for item in thread_map.values():
+                                    _push(item)
+                            except Exception as exc:
+                                print(f"补齐楼中楼失败(root={reply.get('rpid')}): {exc}")
 
                 page += 1
                 await asyncio.sleep(random.uniform(0.3, 0.6))
@@ -944,18 +1079,33 @@ class BilibiliAPI:
         if not comment_type or comment_oid is None:
             return []
 
-        # 动态/相簿/专栏等，优先尝试页面抓取（成功率高），失败回退 /x/v2/reply
+        browser_comments: List[Dict] = []
         if self.prefers_browser_fetch() and post.get("link"):
             try:
-                comments = await self.browser_fetcher.get_page_comments(post["link"])
-                if comments or self.fetch_mode == "browser":
-                    return comments
+                browser_comments = await self.browser_fetcher.get_page_comments(post["link"])
             except Exception as exc:
                 print(f"浏览器抓取评论失败: {exc}")
                 if self.fetch_mode == "browser":
                     return []
 
-        return await self._get_reply_comments_via_http(int(comment_oid), comment_type)
+        # browser-only：尽量返回已抓到的首屏内容（避免额外 API 触发 412）；如为空则继续走 HTTP 兜底
+        if self.fetch_mode == "browser" and browser_comments:
+            return sorted(browser_comments, key=lambda entry: entry.get("ctime", 0), reverse=True)
+
+        http_comments = await self._get_reply_comments_via_http(int(comment_oid), comment_type)
+
+        merged: List[Dict] = []
+        seen = set()
+        for item in (browser_comments or []) + (http_comments or []):
+            if not isinstance(item, dict):
+                continue
+            rpid = item.get("rpid")
+            if rpid is None or rpid in seen:
+                continue
+            merged.append(item)
+            seen.add(rpid)
+
+        return sorted(merged, key=lambda entry: entry.get("ctime", 0), reverse=True)
 
     def filter_up_comments(self, comments: List[Dict], up_uid: int) -> List[Dict]:
         """筛选出UP主的评论"""
