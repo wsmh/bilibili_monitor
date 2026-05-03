@@ -3,7 +3,7 @@ import asyncio
 import time
 from datetime import datetime, time as dt_time
 
-from bili_api import BilibiliAPI, SecurityControlError
+from bili_api import AuthExpiredError, BilibiliAPI, SecurityControlError
 from config import (
     AFTERNOON_END,
     AFTERNOON_INTERVAL_SECONDS,
@@ -99,6 +99,7 @@ class BilibiliMonitor:
         self.login_status_checked = False
         self.monitored_up_label = str(UP_UID)
         self.last_upower_scan_at = 0.0
+        self.last_auth_alert_at = 0.0
 
         print("=" * 60)
         print("🎬 B站UP主评论监控器")
@@ -168,6 +169,9 @@ class BilibiliMonitor:
             post = None
             try:
                 post = await self.bilibili.get_latest_post(UP_UID)
+            except AuthExpiredError as exc:
+                self._maybe_alert_auth_expired(f"获取空间动态失败：{exc}")
+                print(f"🔐 登录态疑似失效: {exc}")
             except SecurityControlError:
                 raise
             except Exception as exc:
@@ -304,6 +308,10 @@ class BilibiliMonitor:
                 up_filter=UPOWER_QA_UP_FILTER,
                 ps=UPOWER_QA_PS,
             )
+        except AuthExpiredError as exc:
+            self._maybe_alert_auth_expired(f"获取充电问答失败：{exc}")
+            print(f"🔐 登录态疑似失效（充电问答）: {exc}")
+            return
         except SecurityControlError:
             raise
         except Exception as exc:
@@ -380,6 +388,20 @@ class BilibiliMonitor:
                 content_ids = [int(item["content_id"]) for item in new_answers]
                 self.storage.mark_multiple_upower_answers_notified(content_ids, UPOWER_QA_MAX_NOTIFIED)
 
+    def _maybe_alert_auth_expired(self, reason: str):
+        now = time.time()
+        if now - self.last_auth_alert_at < 3600:
+            return
+        self.last_auth_alert_at = now
+
+        warning = (
+            "⚠️ B站登录态疑似失效\n"
+            f"👤 UP主: {UP_UID}\n"
+            f"原因: {reason}\n"
+            "请更新 .env 中的 BILI_COOKIE（包含有效 SESSDATA）并重启脚本。"
+        )
+        self.feishu.send_text(warning)
+
     async def _check_login_status(self):
         if self.login_status_checked:
             return
@@ -395,7 +417,7 @@ class BilibiliMonitor:
                 "⚠️ 已检测到 B站 Cookie，但登录态校验失败。\n" "可能是 Cookie 已过期，评论抓取准确率会下降。"
             )
             print(warning)
-            self.feishu.send_text(warning)
+            self._maybe_alert_auth_expired("启动时登录态校验失败")
         else:
             print("⚠️ 未配置 B站 Cookie，将以匿名模式运行")
 

@@ -54,6 +54,8 @@ python monitor.py
 
 充电专属内容需要配置 `BILI_COOKIE`，且该 Cookie 对应的账号必须具备查看该 UP 充电内容的权限，否则评论区可能返回空或报权限不足。
 
+如果脚本开始频繁提示“登录态疑似失效”，并且你观察到它只能识别到普通公开视频（非充电专属）作为“最新内容”，通常就是 Cookie（尤其 `SESSDATA`）过期/失效导致。更新 `.env` 的 `BILI_COOKIE` 并重启即可。
+
 如果你的服务器环境无法安装/下载 Playwright 浏览器（例如内网网关拦截大文件下载），可以先用：
 
 ```env
@@ -117,7 +119,19 @@ BILI_BROWSER_EXECUTABLE=C:\Program Files\Google\Chrome\Application\chrome.exe
 - 如果检测到 Cookie 已配置但登录态失效，会在控制台和飞书里提示
 - 一旦失效，重新从浏览器复制新的 Cookie 并重启程序即可
 
-## 配置文件说明
+## 配置
+
+### ALLOW_PUBLIC_VIDEO_FALLBACK（默认 false）
+
+当你已经配置了登录态（能看充电内容）时，脚本会优先用 space feed API 获取“最新动态/视频”。
+
+如果该接口因为网络抖动/风控临时失败，旧版本会回退到“公开视频列表”，从而可能出现：先推一条非充电视频，下一轮接口恢复后又推一条充电内容，看起来像“登录态回来了”。
+
+现在默认不再回退，避免误报；如你确实希望临时失败时继续用公开视频兜底，可设置：
+
+```bash
+ALLOW_PUBLIC_VIDEO_FALLBACK=true
+```
 
 所有配置都通过 `.env` 文件管理，主要配置项（充电问答相关见 `UPOWER_QA_*`）：
 

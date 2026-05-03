@@ -20,6 +20,7 @@ from config import (
     BILI_COOKIE,
     BILI_DEDEUSERID,
     BILI_FETCH_MODE,
+    ALLOW_PUBLIC_VIDEO_FALLBACK,
     BILI_SESSDATA,
     COMMENT_MAX_PAGES_AUTH,
     COMMENT_MAX_PAGES_GUEST,
@@ -41,6 +42,10 @@ class SecurityControlError(Exception):
     def __init__(self, message: str, cooldown_seconds: int = 120):
         super().__init__(message)
         self.cooldown_seconds = cooldown_seconds
+
+
+class AuthExpiredError(Exception):
+    """B站登录态失效/权限不足。"""
 
 
 class BilibiliAPI:
@@ -342,7 +347,7 @@ class BilibiliAPI:
         if payload.get("code") != 0:
             code = payload.get("code")
             if code == -101:
-                return None
+                raise AuthExpiredError("space feed 需要登录态或权限不足（code=-101）")
             raise Exception(f"space feed api failed: code={code} message={payload.get('message')}")
 
         return extract_latest_post_from_space_dynamic_payload(payload)
@@ -365,8 +370,15 @@ class BilibiliAPI:
             post = await self._get_latest_post_from_space_feed(uid)
             if post:
                 return post
+        except AuthExpiredError:
+            raise
         except Exception as exc:
             print(f"API抓取空间动态失败: {exc}")
+            if self.has_auth() and not ALLOW_PUBLIC_VIDEO_FALLBACK:
+                print(
+                    "⚠️ 已配置登录态，space feed 临时失败，已禁用公开视频兜底（可通过 ALLOW_PUBLIC_VIDEO_FALLBACK=true 开启）"
+                )
+                return None
 
         video = await self.get_latest_video(uid)
         if not video:
@@ -439,7 +451,7 @@ class BilibiliAPI:
         if payload.get("code") != 0:
             code = payload.get("code")
             if code == -101:
-                return None
+                raise AuthExpiredError("upower QA 需要登录态或权限不足（code=-101）")
             raise Exception(f"upower qa list failed: code={code} message={payload.get('message')}")
 
         return payload.get("data") or {}

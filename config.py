@@ -71,6 +71,12 @@ UPOWER_QA_PS = int(os.getenv("UPOWER_QA_PS", "20"))
 UPOWER_QA_MAX_NOTIFIED = int(os.getenv("UPOWER_QA_MAX_NOTIFIED", "200"))
 UPOWER_QA_SCAN_INTERVAL_SECONDS = int(os.getenv("UPOWER_QA_SCAN_INTERVAL_SECONDS", "600"))
 
+# 当已配置登录态但 space feed 发生临时失败时，是否允许回退到公开视频列表。
+# 默认 false：避免出现“先推普通视频，下一轮又推充电内容”的误报。
+ALLOW_PUBLIC_VIDEO_FALLBACK = (
+    os.getenv("ALLOW_PUBLIC_VIDEO_FALLBACK", "false").strip().lower() == "true"
+)
+
 # 首次启动行为：
 # warmup: 仅初始化去重，不推送历史回复（默认，避免刷屏）
 # notify: 首次启动推送最近 N 条可见回复
